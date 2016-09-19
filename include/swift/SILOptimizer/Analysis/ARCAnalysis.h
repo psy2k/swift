@@ -16,6 +16,10 @@
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SIL/SILBasicBlock.h"
+#include "swift/SILOptimizer/Analysis/AliasAnalysis.h"
+#include "swift/SILOptimizer/Analysis/PostOrderAnalysis.h"
+#include "swift/SILOptimizer/Analysis/RCIdentityAnalysis.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
@@ -35,6 +39,11 @@ class SILFunction;
 } // end namespace swift
 
 namespace swift {
+/// Return true if this is a retain instruction.
+bool isRetainInstruction(SILInstruction *II);
+
+/// Return true if this is a release instruction.
+bool isReleaseInstruction(SILInstruction *II);
 
 using RetainList = llvm::SmallVector<SILInstruction *, 1>;
 using ReleaseList = llvm::SmallVector<SILInstruction *, 1>;

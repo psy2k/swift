@@ -109,8 +109,14 @@ ABSTRACT_VALUE(SILInstruction, ValueBase)
   INST(ProjectExistentialBoxInst, SILInstruction, None, DoesNotRelease)
   ABSTRACT_VALUE(IndexingInst, SILInstruction)
     INST(IndexAddrInst, IndexingInst, None, DoesNotRelease)
+    INST(TailAddrInst, IndexingInst, None, DoesNotRelease)
     INST(IndexRawPointerInst, IndexingInst, None, DoesNotRelease)
     VALUE_RANGE(IndexingInst, IndexAddrInst, IndexRawPointerInst)
+
+  // BindMemory has no physical side effect. Semantically it writes to
+  // its affected memory region because any reads or writes accessing
+  // that memory must be dependent on the bind operation.
+  INST(BindMemoryInst, SILInstruction, MayWrite, DoesNotRelease)
 
   // Reference Counting
   ABSTRACT_VALUE(RefCountingInst, SILInstruction)
@@ -180,6 +186,7 @@ ABSTRACT_VALUE(SILInstruction, ValueBase)
   INST(StructExtractInst, SILInstruction, None, DoesNotRelease)
   INST(StructElementAddrInst, SILInstruction, None, DoesNotRelease)
   INST(RefElementAddrInst, SILInstruction, None, DoesNotRelease)
+  INST(RefTailAddrInst, SILInstruction, None, DoesNotRelease)
 
   // Enums
   INST(EnumInst, SILInstruction, None, DoesNotRelease)

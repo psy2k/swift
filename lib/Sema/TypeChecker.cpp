@@ -20,7 +20,6 @@
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/Attr.h"
-#include "swift/AST/ExprHandle.h"
 #include "swift/AST/Identifier.h"
 #include "swift/AST/ModuleLoader.h"
 #include "swift/AST/NameLookup.h"
@@ -93,61 +92,61 @@ ProtocolDecl *TypeChecker::getProtocol(SourceLoc loc, KnownProtocolKind kind) {
 ProtocolDecl *TypeChecker::getLiteralProtocol(Expr *expr) {
   if (isa<ArrayExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::ArrayLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByArrayLiteral);
 
   if (isa<DictionaryExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::DictionaryLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByDictionaryLiteral);
 
   if (!isa<LiteralExpr>(expr))
     return nullptr;
   
   if (isa<NilLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::NilLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByNilLiteral);
   
   if (isa<IntegerLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::IntegerLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByIntegerLiteral);
 
   if (isa<FloatLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::FloatLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByFloatLiteral);
 
   if (isa<BooleanLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::BooleanLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByBooleanLiteral);
 
   if (const auto *SLE = dyn_cast<StringLiteralExpr>(expr)) {
     if (SLE->isSingleUnicodeScalar())
       return getProtocol(
           expr->getLoc(),
-          KnownProtocolKind::UnicodeScalarLiteralConvertible);
+          KnownProtocolKind::ExpressibleByUnicodeScalarLiteral);
 
     if (SLE->isSingleExtendedGraphemeCluster())
       return getProtocol(
           expr->getLoc(),
-          KnownProtocolKind::ExtendedGraphemeClusterLiteralConvertible);
+          KnownProtocolKind::ExpressibleByExtendedGraphemeClusterLiteral);
 
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::StringLiteralConvertible);
+                       KnownProtocolKind::ExpressibleByStringLiteral);
   }
 
   if (isa<InterpolatedStringLiteralExpr>(expr))
     return getProtocol(expr->getLoc(),
-                       KnownProtocolKind::StringInterpolationConvertible);
+                       KnownProtocolKind::ExpressibleByStringInterpolation);
 
   if (auto E = dyn_cast<MagicIdentifierLiteralExpr>(expr)) {
     switch (E->getKind()) {
     case MagicIdentifierLiteralExpr::File:
     case MagicIdentifierLiteralExpr::Function:
       return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::StringLiteralConvertible);
+                         KnownProtocolKind::ExpressibleByStringLiteral);
 
     case MagicIdentifierLiteralExpr::Line:
     case MagicIdentifierLiteralExpr::Column:
       return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::IntegerLiteralConvertible);
+                         KnownProtocolKind::ExpressibleByIntegerLiteral);
 
     case MagicIdentifierLiteralExpr::DSOHandle:
       return nullptr;
@@ -243,13 +242,13 @@ Type TypeChecker::lookupBoolType(const DeclContext *dc) {
       getStdlibModule(dc)->lookupValue({}, Context.getIdentifier("Bool"),
                                        NLKind::QualifiedLookup, results);
       if (results.size() != 1) {
-        diagnose(SourceLoc(), diag::bool_type_broken);
+        diagnose(SourceLoc(), diag::broken_bool);
         return Type();
       }
 
       auto tyDecl = dyn_cast<TypeDecl>(results.front());
       if (!tyDecl) {
-        diagnose(SourceLoc(), diag::bool_type_broken);
+        diagnose(SourceLoc(), diag::broken_bool);
         return Type();
       }
 
@@ -388,6 +387,10 @@ static void bindExtensionDecl(ExtensionDecl *ED, TypeChecker &TC) {
   }
 
   extendedNominal->addExtension(ED);
+}
+
+void TypeChecker::bindExtension(ExtensionDecl *ext) {
+  ::bindExtensionDecl(ext, *this);
 }
 
 static void typeCheckFunctionsAndExternalDecls(TypeChecker &TC) {
@@ -674,12 +677,25 @@ void swift::performWholeModuleTypeChecking(SourceFile &SF) {
 }
 
 bool swift::performTypeLocChecking(ASTContext &Ctx, TypeLoc &T,
-                                   bool isSILType, DeclContext *DC,
+                                   DeclContext *DC,
+                                   bool ProduceDiagnostics) {
+  return performTypeLocChecking(Ctx, T,
+                                /*isSILMode=*/false,
+                                /*isSILType=*/false,
+                                DC, ProduceDiagnostics);
+}
+
+bool swift::performTypeLocChecking(ASTContext &Ctx, TypeLoc &T,
+                                   bool isSILMode,
+                                   bool isSILType,
+                                   DeclContext *DC,
                                    bool ProduceDiagnostics) {
   TypeResolutionOptions options;
 
   // Fine to have unbound generic types.
   options |= TR_AllowUnboundGenerics;
+  if (isSILMode)
+    options |= TR_SILMode;
   if (isSILType)
     options |= TR_SILType;
 
@@ -693,9 +709,10 @@ bool swift::performTypeLocChecking(ASTContext &Ctx, TypeLoc &T,
 }
 
 /// Expose TypeChecker's handling of GenericParamList to SIL parsing.
-GenericSignature *swift::handleSILGenericParams(ASTContext &Ctx,
-                                                GenericParamList *genericParams,
-                                                DeclContext *DC) {
+std::pair<GenericSignature *, GenericEnvironment *>
+swift::handleSILGenericParams(ASTContext &Ctx,
+                              GenericParamList *genericParams,
+                              DeclContext *DC) {
   return TypeChecker(Ctx).handleSILGenericParams(genericParams, DC);
 }
 
@@ -1316,19 +1333,15 @@ private:
       // spec is useless. If so, report this.
       if (CurrentInfo.isContainedIn(NewConstraint)) {
         DiagnosticEngine &Diags = TC.Diags;
-        if (CurrentTRC->getReason() == TypeRefinementContext::Reason::Root) {
-          // Diagnose for checks that are useless because the minimum deployment
-          // target ensures they will never be false. We suppress this warning
-          // when compiling for playgrounds because the developer cannot
-          // cannot explicitly set the minimum deployment target to silence
-          // the alarm. We also suppress in script mode (where setting the
-          // minimum deployment target requires a target triple).
-          if (!TC.getLangOpts().Playground && !TC.getInImmediateMode()) {
-            Diags.diagnose(Query->getLoc(),
-                           diag::availability_query_useless_min_deployment,
-                           platformString(targetPlatform(TC.getLangOpts())));
-          }
-        } else {
+        // Some availability checks will always pass because the minimum
+        // deployment target guarantees they will never be false. We don't
+        // diagnose these checks as useless because the source file may
+        // be shared with other projects/targets having older deployment
+        // targets. We don't currently have a mechanism for the user to
+        // suppress these warnings (for example, by indicating when the
+        // required compatibility version is different than the deployment
+        // target).
+        if (CurrentTRC->getReason() != TypeRefinementContext::Reason::Root) {
           Diags.diagnose(Query->getLoc(),
                          diag::availability_query_useless_enclosing_scope,
                          platformString(targetPlatform(TC.getLangOpts())));

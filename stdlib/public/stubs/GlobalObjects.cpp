@@ -18,6 +18,8 @@
 
 #include "../SwiftShims/GlobalObjects.h"
 #include "swift/Runtime/Metadata.h"
+#include "swift/Runtime/Debug.h"
+#include <stdlib.h>
 
 namespace swift {
 // FIXME(ABI): does this declaration need SWIFT_RUNTIME_STDLIB_INTERFACE?
@@ -39,10 +41,33 @@ swift::_SwiftEmptyArrayStorage swift::_swiftEmptyArrayStorage = {
   }
 };
 
-__swift_uint64_t swift::_swift_stdlib_HashingDetail_fixedSeedOverride = 0;
+static __swift_uint64_t randomUInt64() {
+#if defined(__APPLE__)
+  return static_cast<__swift_uint64_t>(arc4random()) |
+         (static_cast<__swift_uint64_t>(arc4random()) << 32);
+#else
+  auto devUrandom = fopen("/dev/urandom", "r");
+  if (!devUrandom) {
+    swift::fatalError(/* flags = */ 0, "Opening \"/dev/urandom\" failed");
+  }
+  uint64_t result;
+  if (fread(&result, sizeof(result), 1, devUrandom) != 1) {
+    swift::fatalError(/* flags = */ 0, "Reading from \"/dev/urandom\" failed");
+  }
+  if (fclose(devUrandom)) {
+    swift::fatalError(/* flags = */ 0, "Closing \"/dev/urandom\" failed");
+  }
+  return result;
+#endif
+}
 
-/// Backing storage for Swift.Process.arguments.
-void *swift::_swift_stdlib_ProcessArguments = nullptr;
+SWIFT_ALLOWED_RUNTIME_GLOBAL_CTOR_BEGIN
+swift::_SwiftHashingSecretKey swift::_swift_stdlib_Hashing_secretKey = {
+  randomUInt64(), randomUInt64()
+};
+SWIFT_ALLOWED_RUNTIME_GLOBAL_CTOR_END
+
+__swift_uint64_t swift::_swift_stdlib_HashingDetail_fixedSeedOverride = 0;
 
 namespace llvm { namespace hashing { namespace detail {
   // An extern variable expected by LLVM's hashing templates. We don't link any

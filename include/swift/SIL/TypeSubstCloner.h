@@ -18,6 +18,7 @@
 #ifndef SWIFT_SIL_TYPESUBSTCLONER_H
 #define SWIFT_SIL_TYPESUBSTCLONER_H
 
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Type.h"
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/DynamicCasts.h"
@@ -38,6 +39,13 @@ class TypeSubstCloner : public SILClonerWithScopes<ImplClass> {
     llvm_unreachable("Clients need to explicitly call a base class impl!");
   }
 
+  void computeSubsMap() {
+    if (auto *env = Original.getGenericEnvironment()) {
+      auto sig = Original.getLoweredFunctionType()->getGenericSignature();
+      SubsMap = env->getSubstitutionMap(SwiftMod, sig, ApplySubs);
+    }
+  }
+
 public:
   using SILClonerWithScopes<ImplClass>::asImpl;
   using SILClonerWithScopes<ImplClass>::getBuilder;
@@ -51,37 +59,51 @@ public:
   using SILClonerWithScopes<ImplClass>::doPostProcess;
   using SILClonerWithScopes<ImplClass>::ValueMap;
   using SILClonerWithScopes<ImplClass>::addBlockWithUnreachable;
+  using SILClonerWithScopes<ImplClass>::OpenedArchetypesTracker;
 
   TypeSubstCloner(SILFunction &To,
                   SILFunction &From,
-                  TypeSubstitutionMap &ContextSubs,
+                  ArrayRef<Substitution> ApplySubs,
+                  SILOpenedArchetypesTracker &OpenedArchetypesTracker,
+                  bool Inlining = false)
+    : SILClonerWithScopes<ImplClass>(To, OpenedArchetypesTracker, Inlining),
+      SwiftMod(From.getModule().getSwiftModule()),
+      Original(From),
+      ApplySubs(ApplySubs),
+      Inlining(Inlining) {
+    computeSubsMap();
+  }
+
+  TypeSubstCloner(SILFunction &To,
+                  SILFunction &From,
                   ArrayRef<Substitution> ApplySubs,
                   bool Inlining = false)
     : SILClonerWithScopes<ImplClass>(To, Inlining),
       SwiftMod(From.getModule().getSwiftModule()),
-      SubsMap(ContextSubs),
       Original(From),
       ApplySubs(ApplySubs),
-      Inlining(Inlining) { }
+      Inlining(Inlining) {
+    computeSubsMap();
+  }
+
 
 protected:
   SILType remapType(SILType Ty) {
-    return SILType::substType(Original.getModule(), SwiftMod, SubsMap, Ty);
+    return SILType::substType(Original.getModule(), SwiftMod,
+                              SubsMap.getMap(), Ty);
   }
 
   CanType remapASTType(CanType ty) {
-    return ty.subst(SwiftMod, SubsMap, None)->getCanonicalType();
+    return ty.subst(SubsMap, None)->getCanonicalType();
   }
 
   Substitution remapSubstitution(Substitution sub) {
-    auto newSub = sub.subst(SwiftMod,
-                            Original.getContextGenericParams(),
-                            ApplySubs);
+    sub = sub.subst(SwiftMod, SubsMap);
+
     // Remap opened archetypes into the cloned context.
-    newSub = Substitution(getASTTypeInClonedContext(newSub.getReplacement()
-                                                      ->getCanonicalType()),
-                          newSub.getConformances());
-    return newSub;
+    return Substitution(getASTTypeInClonedContext(sub.getReplacement()
+                                                    ->getCanonicalType()),
+                        sub.getConformances());
   }
 
   ProtocolConformanceRef remapConformance(CanType type,
@@ -190,13 +212,8 @@ protected:
 
   void visitWitnessMethodInst(WitnessMethodInst *Inst) {
     // Specialize the Self substitution of the witness_method.
-    //
-    // FIXME: This needs to not only handle Self but all Self derived types so
-    // we handle type aliases correctly.
-    auto sub =
-      Inst->getSelfSubstitution().subst(Inst->getModule().getSwiftModule(),
-                                        Original.getContextGenericParams(),
-                                        ApplySubs);
+    auto sub = Inst->getSelfSubstitution();
+    sub = sub.subst(Inst->getModule().getSwiftModule(), SubsMap);
 
     assert(sub.getConformances().size() == 1 &&
            "didn't get conformance from substitution?!");
@@ -223,7 +240,6 @@ protected:
         getBuilder().createWitnessMethod(
             getOpLocation(Inst->getLoc()), newLookupType, Conformance,
             Inst->getMember(), getOpType(Inst->getType()),
-            Inst->hasOperand() ? getOpValue(Inst->getOperand()) : SILValue(),
             Inst->isVolatile()));
   }
 
@@ -273,7 +289,7 @@ protected:
   /// The Swift module that the cloned function belongs to.
   Module *SwiftMod;
   /// The substitutions list for the specialization.
-  TypeSubstitutionMap &SubsMap;
+  SubstitutionMap SubsMap;
   /// The original function to specialize.
   SILFunction &Original;
   /// The substitutions used at the call site.

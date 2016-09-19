@@ -23,11 +23,26 @@
 #include "swift/SILOptimizer/Analysis/ValueTracking.h"
 #include "swift/SILOptimizer/Utils/Local.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/Debug.h"
 
 using namespace swift;
 
 using BasicBlockRetainValue = std::pair<SILBasicBlock *, SILValue>;
+
+//===----------------------------------------------------------------------===//
+//                             Utility Analysis
+//===----------------------------------------------------------------------===//
+
+bool swift::isRetainInstruction(SILInstruction *I) {
+  return isa<StrongRetainInst>(I) || isa<RetainValueInst>(I);
+}
+
+
+bool swift::isReleaseInstruction(SILInstruction *I) {
+  return isa<StrongReleaseInst>(I) || isa<ReleaseValueInst>(I);
+}
 
 //===----------------------------------------------------------------------===//
 //                             Decrement Analysis
@@ -163,6 +178,7 @@ bool swift::canNeverUseValues(SILInstruction *Inst) {
   case ValueKind::TupleElementAddrInst:
   case ValueKind::UncheckedTakeEnumDataAddrInst:
   case ValueKind::RefElementAddrInst:
+  case ValueKind::RefTailAddrInst:
   case ValueKind::UncheckedEnumDataInst:
   case ValueKind::IndexAddrInst:
   case ValueKind::IndexRawPointerInst:
@@ -775,6 +791,11 @@ collectMatchingReleases(SILBasicBlock *BB) {
   for (auto II = std::next(BB->rbegin()), IE = BB->rend(); II != IE; ++II) {
     // If we do not have a release_value or strong_release. We can continue
     if (!isa<ReleaseValueInst>(*II) && !isa<StrongReleaseInst>(*II)) {
+
+      // We cannot match a final release if it is followed by a dealloc_ref.
+      if (isa<DeallocRefInst>(*II))
+        break;
+
       // We do not know what this instruction is, do a simple check to make sure
       // that it does not decrement the reference count of any of its operand. 
       //
@@ -1154,3 +1175,4 @@ SILInstruction *swift::findReleaseToMatchUnsafeGuaranteedValue(
   }
   return nullptr;
 }
+

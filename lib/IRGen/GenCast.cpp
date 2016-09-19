@@ -163,9 +163,10 @@ llvm::Value *irgen::emitClassDowncast(IRGenFunction &IGF, llvm::Value *from,
       break;
     }
 
-  // If the destination type is a foreign class or a non-specific
+  // If the destination type is a CF type or a non-specific
   // class-bounded archetype, use the most general cast entrypoint.
-  } else if (toType.is<ArchetypeType>() || destClass->isForeign()) {
+  } else if (toType.is<ArchetypeType>() ||
+             destClass->getForeignClassKind()==ClassDecl::ForeignKind::CFType) {
     metadataRef = IGF.emitTypeMetadataRef(toType.getSwiftRValueType());
 
     switch (mode) {
@@ -732,16 +733,14 @@ void irgen::emitScalarCheckedCast(IRGenFunction &IGF,
   assert(sourceType.isObject());
   assert(targetType.isObject());
 
-  OptionalTypeKind optKind;
-  if (auto sourceOptObjectType =
-        sourceType.getAnyOptionalObjectType(IGF.getSILModule(), optKind)) {
+  if (auto sourceOptObjectType = sourceType.getAnyOptionalObjectType()) {
 
     // Translate the value from an enum representation to a possibly-null
     // representation.  Note that we assume that this projection is safe
     // for the particular case of an optional class-reference or metatype
     // value.
     Explosion optValue;
-    auto someDecl = IGF.IGM.Context.getOptionalSomeDecl(optKind);
+    auto someDecl = IGF.IGM.Context.getOptionalSomeDecl();
     emitProjectLoadableEnum(IGF, sourceType, value, someDecl, optValue);
 
     assert(value.empty());

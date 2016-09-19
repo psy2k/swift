@@ -1,4 +1,4 @@
-add_swift_library(swiftSILGen
+add_swift_library(swiftSILGen STATIC
   ArgumentSource.cpp
   Cleanup.cpp
   Condition.cpp
@@ -26,4 +26,6 @@ add_swift_library(swiftSILGen
   SILGenProlog.cpp
   SILGenStmt.cpp
   SILGenType.cpp
-  LINK_LIBRARIES swiftSIL)
+  LINK_LIBRARIES
+    swiftSIL
+)

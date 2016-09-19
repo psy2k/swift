@@ -88,12 +88,6 @@ static void addSwiftContractPass(const PassManagerBuilder &Builder,
     PM.add(createSwiftARCContractPass());
 }
 
-static void addSwiftStackPromotionPass(const PassManagerBuilder &Builder,
-                                       PassManagerBase &PM) {
-  if (Builder.OptLevel > 0)
-    PM.add(createSwiftStackPromotionPass());
-}
-
 static void addSwiftMergeFunctionsPass(const PassManagerBuilder &Builder,
                                        PassManagerBase &PM) {
   if (Builder.OptLevel > 0)
@@ -162,9 +156,6 @@ void swift::performLLVMOptimizations(IRGenOptions &Opts, llvm::Module *Module,
         llvm::createAlwaysInlinerPass(/*insertlifetime*/false);
   }
 
-  PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
-                         addSwiftStackPromotionPass);
-
   // If the optimizer is enabled, we run the ARCOpt pass in the scalar optimizer
   // and the Contract pass as late as possible.
   if (!Opts.DisableLLVMARCOpts) {
@@ -229,6 +220,11 @@ void swift::performLLVMOptimizations(IRGenOptions &Opts, llvm::Module *Module,
   legacy::PassManager ModulePasses;
   ModulePasses.add(createTargetTransformInfoWrapperPass(
       TargetMachine->getTargetIRAnalysis()));
+
+  // If we're generating a profile, add the lowering pass now.
+  if (Opts.GenerateProfile)
+    ModulePasses.add(createInstrProfilingLegacyPass());
+
   PMBuilder.populateModulePassManager(ModulePasses);
 
   // The PMBuilder only knows about LLVM AA passes.  We should explicitly add
@@ -241,10 +237,6 @@ void swift::performLLVMOptimizations(IRGenOptions &Opts, llvm::Module *Module,
         AAR.addAAResult(WrapperPass->getResult());
     }));
   }
-
-  // If we're generating a profile, add the lowering pass now.
-  if (Opts.GenerateProfile)
-    ModulePasses.add(createInstrProfilingPass());
 
   if (Opts.Verify)
     ModulePasses.add(createVerifierPass());
@@ -307,17 +299,20 @@ static bool needsRecompile(StringRef OutputFilename, ArrayRef<uint8_t> HashData,
     return true;
 
   auto BinaryOwner = object::createBinary(OutputFilename);
-  if (!BinaryOwner)
+  if (!BinaryOwner) {
+    consumeError(BinaryOwner.takeError());
     return true;
+  }
   auto *ObjectFile = dyn_cast<object::ObjectFile>(BinaryOwner->getBinary());
   if (!ObjectFile)
     return true;
 
-  const char *HashSectionName = HashGlobal->getSection();
+  StringRef HashSectionName = HashGlobal->getSection();
   // Strip the segment name. For mach-o the GlobalVariable's section name format
   // is <segment>,<section>.
-  if (const char *Comma = ::strchr(HashSectionName, ','))
-    HashSectionName = Comma + 1;
+  size_t Comma = HashSectionName.find_last_of(',');
+  if (Comma != StringRef::npos)
+    HashSectionName = HashSectionName.substr(Comma + 1);
 
   // Search for the section which holds the hash.
   for (auto &Section : ObjectFile->sections()) {
@@ -622,6 +617,7 @@ static std::unique_ptr<llvm::Module> performIRGeneration(IRGenOptions &Opts,
       IGM.emitProtocolConformances();
       IGM.emitTypeMetadataRecords();
       IGM.emitBuiltinReflectionMetadata();
+      IGM.emitReflectionMetadataVersion();
     }
 
     // Okay, emit any definitions that we suddenly need.
@@ -775,6 +771,11 @@ static void performParallelIRGeneration(IRGenOptions &Opts,
   IRGenModule *PrimaryGM = irgen.getPrimaryIGM();
 
   irgen.emitProtocolConformances();
+
+  irgen.emitReflectionMetadataVersion();
+
+  // Emit reflection metadata for builtin and imported types.
+  irgen.emitBuiltinReflectionMetadata();
 
   // Okay, emit any definitions that we suddenly need.
   irgen.emitLazyDefinitions();

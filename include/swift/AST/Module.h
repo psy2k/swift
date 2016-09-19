@@ -44,6 +44,7 @@ namespace clang {
 namespace swift {
   enum class ArtificialMainKind : uint8_t;
   class ASTContext;
+  class ASTScope;
   class ASTWalker;
   class BraceStmt;
   class Decl;
@@ -53,7 +54,6 @@ namespace swift {
   class ExtensionDecl;
   class DebuggerClient;
   class DeclName;
-  class DerivedFileUnit;
   class FileUnit;
   class FuncDecl;
   class InfixOperatorDecl;
@@ -238,16 +238,11 @@ public:
   /// dealing with.
   FileUnit &getMainFile(FileUnitKind expectedKind) const;
 
-  DerivedFileUnit &getDerivedFileUnit() const;
-
   DebuggerClient *getDebugClient() const { return DebugClient; }
   void setDebugClient(DebuggerClient *R) {
     assert(!DebugClient && "Debugger client already set");
     DebugClient = R;
   }
-
-  /// Retrieve the magic __dso_handle variable.
-  VarDecl *getDSOHandle();
 
   /// Returns true if this module was or is being compiled for testing.
   bool isTestingEnabled() const {
@@ -302,6 +297,8 @@ public:
   PrefixOperatorDecl *lookupPrefixOperator(Identifier name,
                                            SourceLoc diagLoc = {});
   PostfixOperatorDecl *lookupPostfixOperator(Identifier name,
+                                             SourceLoc diagLoc = {});
+  PrecedenceGroupDecl *lookupPrecedenceGroup(Identifier name,
                                              SourceLoc diagLoc = {});
   /// @}
 
@@ -750,47 +747,6 @@ public:
                      unsigned Alignment = alignof(FileUnit));
 };
   
-/// A container for a module-level definition derived as part of an implicit
-/// protocol conformance.
-class DerivedFileUnit final : public FileUnit {
-  TinyPtrVector<FuncDecl *> DerivedDecls;
-
-public:
-  DerivedFileUnit(ModuleDecl &M);
-  ~DerivedFileUnit() = default;
-
-  void addDerivedDecl(FuncDecl *FD) {
-    DerivedDecls.push_back(FD);
-  }
-
-  void lookupValue(ModuleDecl::AccessPathTy accessPath, DeclName name,
-                   NLKind lookupKind,
-                   SmallVectorImpl<ValueDecl*> &result) const override;
-  
-  void lookupVisibleDecls(ModuleDecl::AccessPathTy accessPath,
-                          VisibleDeclConsumer &consumer,
-                          NLKind lookupKind) const override;
-  
-  void getTopLevelDecls(SmallVectorImpl<Decl*> &results) const override;
-
-  void lookupObjCMethods(
-         ObjCSelector selector,
-         SmallVectorImpl<AbstractFunctionDecl *> &results) const override;
-
-  Identifier
-  getDiscriminatorForPrivateValue(const ValueDecl *D) const override {
-    llvm_unreachable("no private decls in the derived file unit");
-  }
-
-  static bool classof(const FileUnit *file) {
-    return file->getKind() == FileUnitKind::Derived;
-  }
-  static bool classof(const DeclContext *DC) {
-    return isa<FileUnit>(DC) && classof(cast<FileUnit>(DC));
-  }
-};
-
-
 /// A file containing Swift source code.
 ///
 /// This is a .swift or .sil file (or a virtual file, such as the contents of
@@ -863,6 +819,9 @@ private:
   /// source file.
   llvm::SetVector<NormalProtocolConformance *> UsedConformances;
 
+  /// The scope map that describes this source file.
+  ASTScope *Scope = nullptr;
+
   friend ASTContext;
   friend Impl;
 
@@ -891,6 +850,7 @@ public:
   OperatorMap<InfixOperatorDecl*> InfixOperators;
   OperatorMap<PostfixOperatorDecl*> PostfixOperators;
   OperatorMap<PrefixOperatorDecl*> PrefixOperators;
+  OperatorMap<PrecedenceGroupDecl*> PrecedenceGroups;
 
   /// Describes what kind of file this is, which can affect some type checking
   /// and other behavior.
@@ -988,9 +948,11 @@ public:
                                            SourceLoc diagLoc = {});
   PostfixOperatorDecl *lookupPostfixOperator(Identifier name, bool isCascading,
                                              SourceLoc diagLoc = {});
+  PrecedenceGroupDecl *lookupPrecedenceGroup(Identifier name, bool isCascading,
+                                             SourceLoc diagLoc = {});
   /// @}
 
-  ReferencedNameTracker *getReferencedNameTracker() {
+  ReferencedNameTracker *getReferencedNameTracker() const {
     return ReferencedNames;
   }
   void setReferencedNameTracker(ReferencedNameTracker *Tracker) {
@@ -1009,6 +971,9 @@ public:
   /// If this buffer corresponds to a file on disk, returns the path.
   /// Otherwise, return an empty string.
   StringRef getFilename() const;
+
+  /// Retrieve the scope that describes this source file.
+  ASTScope &getScope();
 
   void dump() const;
   void dump(raw_ostream &os) const;
@@ -1157,6 +1122,13 @@ public:
   ///
   /// \param fixity One of PrefixOperator, InfixOperator, or PostfixOperator.
   virtual OperatorDecl *lookupOperator(Identifier name, DeclKind fixity) const {
+    return nullptr;
+  }
+
+  /// Look up a precedence group.
+  ///
+  /// \param name The precedence group name.
+  virtual PrecedenceGroupDecl *lookupPrecedenceGroup(Identifier name) const {
     return nullptr;
   }
 

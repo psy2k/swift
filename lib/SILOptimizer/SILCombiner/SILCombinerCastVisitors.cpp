@@ -79,16 +79,18 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
   // always legal to do since address-to-pointer pointer-to-address implies
   // layout compatibility.
   //
-  // (pointer-to-address (address-to-pointer %x)) -> (unchecked_addr_cast %x)
-  if (auto *ATPI = dyn_cast<AddressToPointerInst>(PTAI->getOperand())) {
-    return Builder.createUncheckedAddrCast(PTAI->getLoc(), ATPI->getOperand(),
-                                           PTAI->getType());
+  // (pointer-to-address strict (address-to-pointer %x))
+  // -> (unchecked_addr_cast %x)
+  if (PTAI->isStrict()) {
+    if (auto *ATPI = dyn_cast<AddressToPointerInst>(PTAI->getOperand())) {
+      return Builder.createUncheckedAddrCast(PTAI->getLoc(), ATPI->getOperand(),
+                                             PTAI->getType());
+    }
   }
-
   // Turn this also into an index_addr. We generate this pattern after switching
   // the Word type to an explicit Int32 or Int64 in the stdlib.
   //
-  // %101 = builtin "strideof_nonzero"<Int>(%84 : $@thick Int.Type) :
+  // %101 = builtin "strideof"<Int>(%84 : $@thick Int.Type) :
   //         $Builtin.Word
   // %102 = builtin "zextOrBitCast_Word_Int64"(%101 : $Builtin.Word) :
   //         $Builtin.Int64
@@ -99,7 +101,7 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
   // %113 = builtin "truncOrBitCast_Int64_Word"(%112 : $Builtin.Int64) :
   //         $Builtin.Word
   // %114 = index_raw_pointer %100 : $Builtin.RawPointer, %113 : $Builtin.Word
-  // %115 = pointer_to_address %114 : $Builtin.RawPointer to $*Int
+  // %115 = pointer_to_address %114 : $Builtin.RawPointer to [strict] $*Int
   SILValue Distance;
   SILValue TruncOrBitCast;
   MetatypeInst *Metatype;
@@ -117,13 +119,13 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
                 m_ApplyInst(
                     BuiltinValueKind::SMulOver, m_SILValue(Distance),
                     m_ApplyInst(BuiltinValueKind::ZExtOrBitCast,
-                                m_ApplyInst(BuiltinValueKind::StrideofNonZero,
+                                m_ApplyInst(BuiltinValueKind::Strideof,
                                             m_MetatypeInst(Metatype))))) ||
           match(StrideMul,
                 m_ApplyInst(
                     BuiltinValueKind::SMulOver,
                     m_ApplyInst(BuiltinValueKind::ZExtOrBitCast,
-                                m_ApplyInst(BuiltinValueKind::StrideofNonZero,
+                                m_ApplyInst(BuiltinValueKind::Strideof,
                                             m_MetatypeInst(Metatype))),
                     m_SILValue(Distance)))) {
         SILType InstanceType =
@@ -137,7 +139,8 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
         }
 
         auto *NewPTAI = Builder.createPointerToAddress(PTAI->getLoc(), Ptr,
-                                                        PTAI->getType());
+                                                       PTAI->getType(),
+                                                       PTAI->isStrict());
         auto DistanceAsWord = Builder.createBuiltin(
             PTAI->getLoc(), Trunc->getName(), Trunc->getType(), {}, Distance);
 
@@ -149,11 +152,11 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
   //
   //   %stride = Builtin.strideof(T) * %distance
   //   %ptr' = index_raw_pointer %ptr, %stride
-  //   %result = pointer_to_address %ptr, $T'
+  //   %result = pointer_to_address %ptr, [strict] $T'
   //
   // To:
   //
-  //   %addr = pointer_to_address %ptr, $T
+  //   %addr = pointer_to_address %ptr, [strict] $T
   //   %result = index_addr %addr, %distance
   //
   BuiltinInst *Bytes;
@@ -163,10 +166,6 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
                                                      0)))) {
     if (match(Bytes, m_ApplyInst(BuiltinValueKind::SMulOver, m_ValueBase(),
                                  m_ApplyInst(BuiltinValueKind::Strideof,
-                                             m_MetatypeInst(Metatype)),
-                                 m_ValueBase())) ||
-        match(Bytes, m_ApplyInst(BuiltinValueKind::SMulOver, m_ValueBase(),
-                                 m_ApplyInst(BuiltinValueKind::StrideofNonZero,
                                              m_MetatypeInst(Metatype)),
                                  m_ValueBase()))) {
       SILType InstanceType =
@@ -181,7 +180,8 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
       SILValue Ptr = IRPI->getOperand(0);
       SILValue Distance = Bytes->getArguments()[0];
       auto *NewPTAI =
-          Builder.createPointerToAddress(PTAI->getLoc(), Ptr, PTAI->getType());
+        Builder.createPointerToAddress(PTAI->getLoc(), Ptr, PTAI->getType(),
+                                       PTAI->isStrict());
       return Builder.createIndexAddr(PTAI->getLoc(), NewPTAI, Distance);
     }
   }

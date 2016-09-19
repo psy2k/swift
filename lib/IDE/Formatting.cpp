@@ -232,6 +232,10 @@ public:
     return LineAndColumn;
   }
 
+  bool exprEndAtLine(Expr *E, unsigned Line) {
+    return E->getEndLoc().isValid() && SM.getLineNumber(E->getEndLoc()) == Line;
+  };
+
   bool shouldAddIndentForLine(unsigned Line) {
     if (Cursor == Stack.rend())
       return false;
@@ -366,7 +370,8 @@ public:
     Expr *AtExprEnd = End.getAsExpr();
     if (AtExprEnd && (isa<ClosureExpr>(AtExprEnd) ||
                       isa<ParenExpr>(AtExprEnd) ||
-                      isa<TupleExpr>(AtExprEnd))) {
+                      isa<TupleExpr>(AtExprEnd) ||
+                      isa<CaptureListExpr>(AtExprEnd))) {
 
       if (auto *Paren = dyn_cast_or_null<ParenExpr>(Cursor->getAsExpr())) {
         auto *SubExpr = Paren->getSubExpr();
@@ -390,6 +395,35 @@ public:
             Elements[1]->getKind() == ExprKind::Assign &&
             SM.getLineAndColumn(Elements[2]->getEndLoc()).first == Line) {
               return false;
+        }
+      }
+    }
+
+    //  let msg = String([65, 108, 105, 103, 110].map { c in
+    //    Character(UnicodeScalar(c))
+    //  }) <--- No indentation here.
+    auto AtCursorExpr = Cursor->getAsExpr();
+    if (AtExprEnd && AtCursorExpr && (isa<ParenExpr>(AtCursorExpr) ||
+                                      isa<TupleExpr>(AtCursorExpr))) {
+      if (isa<CallExpr>(AtExprEnd)) {
+        if (exprEndAtLine(AtExprEnd, Line) &&
+            exprEndAtLine(AtCursorExpr, Line)) {
+          return false;
+        }
+      }
+
+      // foo(A: {
+      //  ...
+      // }, B: { <--- No indentation here.
+      //  ...
+      // })
+      if (auto *TE = dyn_cast<TupleExpr>(AtCursorExpr)) {
+        if (isa<ClosureExpr>(AtExprEnd) && exprEndAtLine(AtExprEnd, Line)) {
+          for (auto *ELE : TE->getElements()) {
+            if (exprEndAtLine(ELE, Line)) {
+              return false;
+            }
+          }
         }
       }
     }
@@ -477,7 +511,7 @@ class FormatWalker : public SourceEntityWalker {
         return;
       SourceLoc PrevLoc;
       auto FindAlignLoc = [&](SourceLoc Loc) {
-        if (PrevLoc.isValid() &&
+        if (PrevLoc.isValid() && Loc.isValid() &&
             SM.getLineNumber(PrevLoc) == SM.getLineNumber(Loc))
           return PrevLoc;
         return PrevLoc = Loc;
@@ -845,15 +879,15 @@ std::pair<LineRange, std::string> swift::ide::reformat(LineRange Range,
                                                        CodeFormatOptions Options,
                                                        SourceManager &SM,
                                                        SourceFile &SF) {
-            FormatWalker walker(SF, SM);
-            auto SourceBufferID = SF.getBufferID().getValue();
-            StringRef Text = SM.getLLVMSourceMgr()
-                               .getMemoryBuffer(SourceBufferID)->getBuffer();
-            size_t Offset = getOffsetOfTrimmedLine(Range.startLine(), Text);
-            SourceLoc Loc = SM.getLocForBufferStart(SourceBufferID)
-                              .getAdvancedLoc(Offset);
-            FormatContext FC = walker.walkToLocation(Loc);
-            CodeFormatter CF(Options);
-            return CF.indent(Range.startLine(), FC, Text);
+  FormatWalker walker(SF, SM);
+  auto SourceBufferID = SF.getBufferID().getValue();
+  StringRef Text = SM.getLLVMSourceMgr()
+    .getMemoryBuffer(SourceBufferID)->getBuffer();
+  size_t Offset = getOffsetOfTrimmedLine(Range.startLine(), Text);
+  SourceLoc Loc = SM.getLocForBufferStart(SourceBufferID)
+    .getAdvancedLoc(Offset);
+  FormatContext FC = walker.walkToLocation(Loc);
+  CodeFormatter CF(Options);
+  return CF.indent(Range.startLine(), FC, Text);
 }
 

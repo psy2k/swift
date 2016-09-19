@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-silgen -emit-verbose-sil %s | FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen -emit-verbose-sil %s | %FileCheck %s
 
 // CHECK-LABEL: @_specialize(Int, Float)
 // CHECK-NEXT: func specializeThis<T, U>(_ t: T, u: U)
@@ -34,7 +34,7 @@ public class CC<T : PP> {
 
 // CHECK-LABEL: sil hidden [_specialize <Int, Float>] @_TF15specialize_attr14specializeThisu0_rFTx1uq__T_ : $@convention(thin) <T, U> (@in T, @in U) -> () {
 
-// CHECK-LABEL: sil [noinline] [_specialize <RR, Float, SS, Int>] @_TFC15specialize_attr2CC3foouRd__S_2QQrfTqd__1gGVS_2GGx__Tqd__GS2_x__ : $@convention(method) <T where T : PP><U where U : QQ> (@in U, GG<T>, @guaranteed CC<T>) -> (@out U, GG<T>) {
+// CHECK-LABEL: sil [noinline] [_specialize <RR, SS, Float, Int>] @_TFC15specialize_attr2CC3foouRd__S_2QQrfTqd__1gGVS_2GGx__Tqd__GS2_x__ : $@convention(method) <T where T : PP><U where U : QQ> (@in U, GG<T>, @guaranteed CC<T>) -> (@out U, GG<T>) {
 
 // -----------------------------------------------------------------------------
 // Test user-specialized subscript accessors.
@@ -48,7 +48,7 @@ public class ASubscriptable<Element> : TestSubscriptable {
   var storage: UnsafeMutablePointer<Element>
 
   init(capacity: Int) {
-    storage = UnsafeMutablePointer<Element>(allocatingCapacity: capacity)
+    storage = UnsafeMutablePointer<Element>.allocate(capacity: capacity)
   }
 
   public subscript(i: Int) -> Element {
@@ -76,7 +76,7 @@ public class Addressable<Element> : TestSubscriptable {
   var storage: UnsafeMutablePointer<Element>
 
   init(capacity: Int) {
-    storage = UnsafeMutablePointer<Element>(allocatingCapacity: capacity)
+    storage = UnsafeMutablePointer<Element>.allocate(capacity: capacity)
   }
 
   public subscript(i: Int) -> Element {

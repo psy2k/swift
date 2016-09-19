@@ -184,7 +184,7 @@ matchSizeOfMultiplication(SILValue I, MetatypeInst *RequiredType,
                   m_ApplyInst(
                       BuiltinValueKind::SMulOver, m_SILValue(Dist),
                       m_ApplyInst(BuiltinValueKind::ZExtOrBitCast,
-                                  m_ApplyInst(BuiltinValueKind::StrideofNonZero,
+                                  m_ApplyInst(BuiltinValueKind::Strideof,
                                               m_MetatypeInst(StrideType)))),
                   0))) ||
       match(
@@ -195,7 +195,7 @@ matchSizeOfMultiplication(SILValue I, MetatypeInst *RequiredType,
                   m_ApplyInst(
                       BuiltinValueKind::SMulOver,
                       m_ApplyInst(BuiltinValueKind::ZExtOrBitCast,
-                                  m_ApplyInst(BuiltinValueKind::StrideofNonZero,
+                                  m_ApplyInst(BuiltinValueKind::Strideof,
                                               m_MetatypeInst(StrideType))),
                       m_SILValue(Dist)),
                   0)))) {
@@ -222,8 +222,9 @@ static SILInstruction *createIndexAddrFrom(IndexRawPointerInst *I,
   SILType InstanceType =
     Metatype->getType().getMetatypeInstanceType(I->getModule());
 
+  // index_raw_pointer's address type is currently always strict.
   auto *NewPTAI = Builder.createPointerToAddress(
-    I->getLoc(), Ptr, InstanceType.getAddressType());
+    I->getLoc(), Ptr, InstanceType.getAddressType(), /*isStrict*/ true);
 
   auto *DistanceAsWord =
       Builder.createBuiltin(I->getLoc(), TruncOrBitCast->getName(),
@@ -248,7 +249,7 @@ SILInstruction *optimizeBuiltinArrayOperation(BuiltinInst *I,
   //     = builtin "takeArrayFrontToBack"<Int>(%metatype, %ptr', ...
 
   // And convert it to this:
-  //   %addr = pointer_to_address %ptr, $T
+  //   %addr = pointer_to_address %ptr, strict $*T
   //   %result = index_addr %addr, %distance
   //   %ptr' = address_to_pointer result : $RawPointer
   //     = builtin "takeArrayFrontToBack"<Int>(%metatype, %ptr', ...
@@ -463,9 +464,6 @@ SILInstruction *SILCombiner::visitBuiltinInst(BuiltinInst *I) {
 
   if (match(I, m_ApplyInst(BuiltinValueKind::SMulOver,
                             m_ApplyInst(BuiltinValueKind::Strideof),
-                            m_ValueBase(), m_IntegerLiteralInst())) ||
-      match(I, m_ApplyInst(BuiltinValueKind::SMulOver,
-                            m_ApplyInst(BuiltinValueKind::StrideofNonZero),
                             m_ValueBase(), m_IntegerLiteralInst()))) {
     I->swapOperands(0, 1);
     return I;

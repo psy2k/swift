@@ -21,7 +21,6 @@
 #include "swift/AST/ClangNode.h"
 #include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/DefaultArgumentKind.h"
-#include "swift/AST/ExprHandle.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/LazyResolver.h"
 #include "swift/AST/TypeAlignments.h"
@@ -29,13 +28,13 @@
 #include "swift/Basic/Range.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/TrailingObjects.h"
 
 namespace swift {
   enum class AccessSemantics : unsigned char;
   class ApplyExpr;
   class ArchetypeBuilder;
+  class GenericEnvironment;
   class ArchetypeType;
   class ASTContext;
   class ASTPrinter;
@@ -104,6 +103,7 @@ enum class DescriptiveDeclKind : uint8_t {
   InfixOperator,
   PrefixOperator,
   PostfixOperator,
+  PrecedenceGroup,
   TypeAlias,
   GenericTypeParam,
   AssociatedType,  
@@ -245,8 +245,11 @@ class alignas(1 << DeclAlignInBits) Decl {
 
     /// \brief Whether 'static' or 'class' was used.
     unsigned StaticSpelling : 2;
+
+    /// \brief The number of pattern binding declarations.
+    unsigned NumPatternEntries : 16;
   };
-  enum { NumPatternBindingDeclBits = NumDeclBits + 3 };
+  enum { NumPatternBindingDeclBits = NumDeclBits + 19 };
   static_assert(NumPatternBindingDeclBits <= 32, "fits in an unsigned");
   
   class ValueDeclBitfields {
@@ -458,8 +461,8 @@ class alignas(1 << DeclAlignInBits) Decl {
     /// This is a value of \c StoredInheritsSuperclassInits.
     unsigned InheritsSuperclassInits : 2;
 
-    /// Whether this class is "foreign".
-    unsigned Foreign : 1;
+    /// \see ClassDecl::ForeignKind
+    unsigned RawForeignKind : 2;
     
     /// Whether this class contains a destructor decl.
     ///
@@ -468,7 +471,7 @@ class alignas(1 << DeclAlignInBits) Decl {
     /// control inserting the implicit destructor.
     unsigned HasDestructorDecl : 1;
   };
-  enum { NumClassDeclBits = NumNominalTypeDeclBits + 7 };
+  enum { NumClassDeclBits = NumNominalTypeDeclBits + 8 };
   static_assert(NumClassDeclBits <= 32, "fits in an unsigned");
 
   class StructDeclBitfields {
@@ -492,19 +495,18 @@ class alignas(1 << DeclAlignInBits) Decl {
   enum { NumEnumDeclBits = NumNominalTypeDeclBits + 2 };
   static_assert(NumEnumDeclBits <= 32, "fits in an unsigned");
   
-  class InfixOperatorDeclBitfields {
-    friend class InfixOperatorDecl;
+  class PrecedenceGroupDeclBitfields {
+    friend class PrecedenceGroupDecl;
     unsigned : NumDeclBits;
 
+    /// The group's associativity.  A value of the Associativity enum.
     unsigned Associativity : 2;
-    unsigned Precedence : 8;
-    unsigned Assignment : 1;
-    unsigned IsAssocImplicit : 1;
-    unsigned IsPrecedenceImplicit : 1;
-    unsigned IsAssignmentImplicit : 1;
+
+    /// Is this an assignment operator?
+    unsigned IsAssignment : 1;
   };
-  enum { NumInfixOperatorDeclBits = NumDeclBits + 14 };
-  static_assert(NumInfixOperatorDeclBits <= 32, "fits in an unsigned");
+  enum { NumPrecedenceGroupDeclBits = NumDeclBits + 11 };
+  static_assert(NumPrecedenceGroupDeclBits <= 32, "fits in an unsigned");
 
   class AssociatedTypeDeclBitfields {
     friend class AssociatedTypeDecl;
@@ -541,16 +543,16 @@ class alignas(1 << DeclAlignInBits) Decl {
 
     /// An encoding of the default and maximum access level for this extension.
     ///
-    /// This is encoded as (1 << maxAccess) | (1 << defaultAccess), which
-    /// works because the maximum is always greater than or equal to the
-    /// default. 0 represents an uncomputed value.
+    /// This is encoded as (1 << (maxAccess-1)) | (1 << (defaultAccess-1)),
+    /// which works because the maximum is always greater than or equal to the
+    /// default, and 'private' is never used. 0 represents an uncomputed value.
     unsigned DefaultAndMaxAccessLevel : 3;
 
     /// Whether there is an active conformance loader for this
     /// extension.
     unsigned HaveConformanceLoader : 1;
   };
-  enum { NumExtensionDeclBits = NumDeclBits + 5 };
+  enum { NumExtensionDeclBits = NumDeclBits + 6 };
   static_assert(NumExtensionDeclBits <= 32, "fits in an unsigned");
 
 protected:
@@ -571,7 +573,7 @@ protected:
     StructDeclBitfields StructDeclBits;
     EnumDeclBitfields EnumDeclBits;
     AssociatedTypeDeclBitfields AssociatedTypeDeclBits;
-    InfixOperatorDeclBitfields InfixOperatorDeclBits;
+    PrecedenceGroupDeclBitfields PrecedenceGroupDeclBits;
     ImportDeclBitfields ImportDeclBits;
     ExtensionDeclBitfields ExtensionDeclBits;
     uint32_t OpaqueBits;
@@ -813,6 +815,13 @@ public:
   /// Whether this declaration is weak-imported.
   bool isWeakImported(ModuleDecl *fromModule) const;
 
+  /// Returns true if the nature of this declaration allows overrides.
+  /// Note that this does not consider whether it is final or whether
+  /// the class it's on is final.
+  ///
+  /// If this returns true, the decl can be safely casted to ValueDecl.
+  bool isPotentiallyOverridable() const;
+
   // Make vanilla new/delete illegal for Decls.
   void *operator new(size_t Bytes) = delete;
   void operator delete(void *Data) = delete;
@@ -1042,9 +1051,6 @@ public:
   void printAsWritten(raw_ostream &OS) const;
 };
   
-template<typename T, ArrayRef<T> (GenericParamList::*accessor)() const>
-class NestedGenericParamListIterator;
-  
 /// GenericParamList - A list of generic parameters that is part of a generic
 /// function or type, along with extra requirements placed on those generic
 /// parameters and types derived from them.
@@ -1056,7 +1062,6 @@ class GenericParamList final :
   unsigned NumParams;
   SourceLoc WhereLoc;
   MutableArrayRef<RequirementRepr> Requirements;
-  ArrayRef<ArchetypeType *> AllArchetypes;
 
   GenericParamList *OuterParameters;
 
@@ -1106,28 +1111,6 @@ public:
                                   MutableArrayRef<RequirementRepr> Requirements,
                                   SourceLoc RAngleLoc);
 
-  /// Create a new generic parameter list with the same parameters and
-  /// requirements as this one, but parented to a different outer parameter
-  /// list.
-  GenericParamList *cloneWithOuterParameters(const ASTContext &Context,
-                                             GenericParamList *Outer) {
-    auto clone = create(Context,
-                        SourceLoc(),
-                        getParams(),
-                        SourceLoc(),
-                        getRequirements(),
-                        SourceLoc());
-    clone->setAllArchetypes(getAllArchetypes());
-    clone->setOuterParameters(Outer);
-    return clone;
-  }
-  
-  /// Create an empty generic parameter list.
-  static GenericParamList *getEmpty(ASTContext &Context) {
-    // TODO: Could probably unique this in the AST context.
-    return create(Context, SourceLoc(), {}, SourceLoc(), {}, SourceLoc());
-  }
-  
   MutableArrayRef<GenericTypeParamDecl *> getParams() {
     return {getTrailingObjects<GenericTypeParamDecl *>(), NumParams};
   }
@@ -1145,12 +1128,6 @@ public:
   const_iterator begin() const { return getParams().begin(); }
   const_iterator end() const { return getParams().end(); }
 
-  /// Get the total number of parameters, including those from parent generic
-  /// parameter lists.
-  unsigned totalSize() const {
-    return NumParams + (OuterParameters ? OuterParameters->totalSize() : 0);
-  }
-  
   /// \brief Retrieve the location of the 'where' keyword, or an invalid
   /// location if 'where' was not present.
   SourceLoc getWhereLoc() const { return WhereLoc; }
@@ -1196,52 +1173,6 @@ public:
   /// main part of a declaration's signature.
   void addTrailingWhereClause(ASTContext &ctx, SourceLoc trailingWhereLoc,
                               ArrayRef<RequirementRepr> trailingRequirements);
-
-  /// \brief Retrieves the list containing all archetypes described by this
-  /// generic parameter clause.
-  ///
-  /// In this list of archetypes, the primary archetypes come first followed by
-  /// any non-primary archetypes (i.e., those archetypes that encode associated
-  /// types of another archetype).
-  ///
-  /// This does not include archetypes from the outer generic parameter list(s).
-  ArrayRef<ArchetypeType *> getAllArchetypes() const { return AllArchetypes; }
-
-  /// \brief Return the number of primary archetypes.
-  unsigned getNumPrimaryArchetypes() const {
-    return size();
-  }
-  
-  /// \brief Retrieves the list containing only the primary archetypes described
-  /// by this generic parameter clause. This excludes archetypes for associated
-  /// types of the primary archetypes.
-  ArrayRef<ArchetypeType *> getPrimaryArchetypes() const {
-    return getAllArchetypes().slice(0, getNumPrimaryArchetypes());
-  }
-  
-  /// \brief Sets all archetypes *without* copying the source array.
-  void setAllArchetypes(ArrayRef<ArchetypeType *> AA) {
-    assert(AA.size() >= size()
-           && "allArchetypes is smaller than number of generic params?!");
-    AllArchetypes = AA;
-  }
-
-  using NestedArchetypeIterator
-    = NestedGenericParamListIterator<ArchetypeType*,
-                                     &GenericParamList::getAllArchetypes>;
-  using NestedGenericParamIterator
-    = NestedGenericParamListIterator<GenericTypeParamDecl*,
-                                     &GenericParamList::getParams>;
-  
-  /// \brief Retrieves a list containing all archetypes from this generic
-  /// parameter clause and all outer generic parameter clauses in outer-to-
-  /// inner order.
-  iterator_range<NestedArchetypeIterator> getAllNestedArchetypes() const;
-  
-  /// \brief Retrieves a list containing all generic parameter records from
-  /// this generic parameter clause and all outer generic parameter clauses in
-  /// outer-to-inner order.
-  iterator_range<NestedGenericParamIterator> getNestedGenericParams() const;
   
   /// \brief Retrieve the outer generic parameter list, which provides the
   /// generic parameters of the context in which this generic parameter list
@@ -1296,110 +1227,10 @@ public:
     return depth;
   }
 
-  /// Derive a type substitution map for this generic parameter list from a
-  /// matching substitution vector.
-  TypeSubstitutionMap getSubstitutionMap(ArrayRef<Substitution> Subs) const;
-
-  /// Derive the all-archetypes list for the given list of generic
-  /// parameters.
-  static ArrayRef<ArchetypeType*>
-  deriveAllArchetypes(ArrayRef<GenericTypeParamDecl*> params,
-                      SmallVectorImpl<ArchetypeType*> &archetypes);
-
-  ArrayRef<Substitution> getForwardingSubstitutions(ASTContext &C);
-
-  /// Collect the nested archetypes of an archetype into the given
-  /// collection.
-  ///
-  /// \param known - the set of archetypes already present in `all`
-  /// \param all - the output list of archetypes
-  static void addNestedArchetypes(ArchetypeType *archetype,
-                                  SmallPtrSetImpl<ArchetypeType*> &known,
-                                  SmallVectorImpl<ArchetypeType*> &all);
-  
   void print(raw_ostream &OS);
   void dump();
 };
   
-/// An iterator template for lazily walking a nested generic parameter list.
-template<typename T, ArrayRef<T> (GenericParamList::*accessor)() const>
-class NestedGenericParamListIterator {
-  SmallVector<const GenericParamList*, 2> stack;
-  ArrayRef<T> elements;
-
-  void refreshElements() {
-    while (elements.empty()) {
-      stack.pop_back();
-      if (stack.empty()) break;
-      elements = (stack.back()->*accessor)();
-    }
-  }
-public:
-  // Create a 'begin' iterator for a generic param list.
-  NestedGenericParamListIterator(const GenericParamList *params) {
-    // Walk up to the outermost list to create a stack of lists to walk.
-    while (params) {
-      stack.push_back(params);
-      params = params->getOuterParameters();
-    }
-    // If the stack is empty, be like the 'end' iterator.
-    if (stack.empty())
-      return;
-
-    elements = (stack.back()->*accessor)();
-    refreshElements();
-  }
-  
-  // Create an 'end' iterator.
-  NestedGenericParamListIterator() {}
-  
-  // Iterator dereference.
-  const T &operator*() const {
-    return elements[0];
-  }
-  const T *operator->() const {
-    return &elements[0];
-  }
-  
-  // Iterator advancement.
-  NestedGenericParamListIterator &operator++() {
-    elements = elements.slice(1);
-    refreshElements();
-    return *this;
-  }
-  NestedGenericParamListIterator operator++(int) {
-    auto copy = *this;
-    ++(*this);
-    return copy;
-  }
-  
-  // Ghetto comparison. Only true if end() == end().
-  bool operator==(const NestedGenericParamListIterator &o) const {
-    return stack.empty() && o.stack.empty();
-  }
-  bool operator!=(const NestedGenericParamListIterator &o) const {
-    return !stack.empty() || !o.stack.empty();
-  }
-  
-  // An empty range of nested archetypes.
-  static iterator_range<NestedGenericParamListIterator> emptyRange() {
-    return {{}, {}};
-  }
-};
-  
-using NestedArchetypeIterator = GenericParamList::NestedArchetypeIterator;
-using NestedGenericParamIterator = GenericParamList::NestedGenericParamIterator;
-
-inline iterator_range<NestedArchetypeIterator>
-GenericParamList::getAllNestedArchetypes() const {
-  return {NestedArchetypeIterator(this), NestedArchetypeIterator()};
-}
-  
-inline iterator_range<NestedGenericParamIterator>
-GenericParamList::getNestedGenericParams() const {
-  return {NestedGenericParamIterator(this), NestedGenericParamIterator()};
-}
-
 /// A trailing where clause.
 class alignas(RequirementRepr) TrailingWhereClause final :
     private llvm::TrailingObjects<TrailingWhereClause, RequirementRepr> {
@@ -1568,6 +1399,12 @@ class ExtensionDecl final : public Decl, public DeclContext,
   /// the parsed representation, and not part of the module file.
   GenericSignature *GenericSig = nullptr;
 
+  /// \brief The generic context of this extension.
+  ///
+  /// This is the mapping between interface types and archetypes for the
+  /// generic parameters of this extension.
+  GenericEnvironment *GenericEnv = nullptr;
+
   MutableArrayRef<TypeLoc> Inherited;
 
   /// The trailing where clause.
@@ -1651,7 +1488,19 @@ public:
   GenericSignature *getGenericSignature() const { return GenericSig; }
 
   /// Set the generic signature of this extension.
-  void setGenericSignature(GenericSignature *sig);
+  void setGenericSignature(GenericSignature *sig) {
+    assert(!GenericSig && "Already have generic signature");
+    GenericSig = sig;
+  }
+
+  /// Retrieve the generic context for this extension.
+  GenericEnvironment *getGenericEnvironment() const { return GenericEnv; }
+
+  /// Set the generic context of this extension.
+  void setGenericEnvironment(GenericEnvironment *env) {
+    assert(!GenericEnv && "Already have generic context");
+    GenericEnv = env;
+  }
 
   /// Retrieve the generic requirements.
   ArrayRef<Requirement> getGenericRequirements() const;
@@ -1699,10 +1548,10 @@ public:
   Accessibility getDefaultAccessibility() const {
     assert(hasDefaultAccessibility() && "not computed yet");
     if (ExtensionDeclBits.DefaultAndMaxAccessLevel &
-        (1 << static_cast<unsigned>(Accessibility::Private)))
-      return Accessibility::Private;
+        (1 << (static_cast<unsigned>(Accessibility::FilePrivate) - 1)))
+      return Accessibility::FilePrivate;
     if (ExtensionDeclBits.DefaultAndMaxAccessLevel &
-        (1 << static_cast<unsigned>(Accessibility::Internal)))
+        (1 << (static_cast<unsigned>(Accessibility::Internal) - 1)))
       return Accessibility::Internal;
     return Accessibility::Public;
   }
@@ -1710,21 +1559,23 @@ public:
   Accessibility getMaxAccessibility() const {
     assert(hasDefaultAccessibility() && "not computed yet");
     if (ExtensionDeclBits.DefaultAndMaxAccessLevel &
-        (1 << static_cast<unsigned>(Accessibility::Public)))
+        (1 << (static_cast<unsigned>(Accessibility::Public) - 1)))
       return Accessibility::Public;
     if (ExtensionDeclBits.DefaultAndMaxAccessLevel &
-        (1 << static_cast<unsigned>(Accessibility::Internal)))
+        (1 << (static_cast<unsigned>(Accessibility::Internal) - 1)))
       return Accessibility::Internal;
-    return Accessibility::Private;
+    return Accessibility::FilePrivate;
   }
 
   void setDefaultAndMaxAccessibility(Accessibility defaultAccess,
                                      Accessibility maxAccess) {
     assert(!hasDefaultAccessibility() && "default accessibility already set");
     assert(maxAccess >= defaultAccess);
+    assert(maxAccess != Accessibility::Private && "private not valid");
+    assert(defaultAccess != Accessibility::Private && "private not valid");
     ExtensionDeclBits.DefaultAndMaxAccessLevel =
-        (1 << static_cast<unsigned>(defaultAccess)) |
-        (1 << static_cast<unsigned>(maxAccess));
+        (1 << (static_cast<unsigned>(defaultAccess) - 1)) |
+        (1 << (static_cast<unsigned>(maxAccess) - 1));
     assert(getDefaultAccessibility() == defaultAccess && "not enough bits");
     assert(getMaxAccessibility() == maxAccess && "not enough bits");
   }
@@ -1819,9 +1670,14 @@ class PatternBindingEntry {
   // initializer is ASTContext-allocated it is safe.
   llvm::PointerIntPair<Expr *, 2, OptionSet<Flags>> InitCheckedAndRemoved;
 
+  /// The initializer context used for this pattern binding entry.
+  DeclContext *InitContext = nullptr;
+
+  friend class PatternBindingInitializer;
+
 public:
-  PatternBindingEntry(Pattern *P, Expr *E)
-    : ThePattern(P), InitCheckedAndRemoved(E, {}) {}
+  PatternBindingEntry(Pattern *P, Expr *E, DeclContext *InitContext)
+    : ThePattern(P), InitCheckedAndRemoved(E, {}), InitContext(InitContext) {}
 
   Pattern *getPattern() const { return ThePattern; }
   void setPattern(Pattern *P) { ThePattern = P; }
@@ -1831,6 +1687,10 @@ public:
   }
   SourceRange getOrigInitRange() const;
   void setInit(Expr *E);
+
+  /// Retrieve the initializer as it was written in the source.
+  Expr *getInitAsWritten() const { return InitCheckedAndRemoved.getPointer(); }
+
   bool isInitializerChecked() const {
     return InitCheckedAndRemoved.getInt().contains(Flags::Checked);
   }
@@ -1838,6 +1698,21 @@ public:
     InitCheckedAndRemoved.setInt(
       InitCheckedAndRemoved.getInt() | Flags::Checked);
   }
+
+  // Return the first variable initialized by this pattern.
+  VarDecl *getAnchoringVarDecl() const;
+
+  // Retrieve the declaration context for the initializer.
+  DeclContext *getInitContext() const { return InitContext; }
+
+  /// Override the initializer context.
+  void setInitContext(DeclContext *dc) { InitContext = dc; }
+
+  /// Retrieve the source range covered by this pattern binding.
+  ///
+  /// \param omitAccessors Whether the computation should omit the accessors
+  /// from the source range.
+  SourceRange getSourceRange(bool omitAccessors = false) const;
 };
 
 /// \brief This decl contains a pattern and optional initializer for a set
@@ -1859,8 +1734,6 @@ class PatternBindingDecl final : public Decl,
   SourceLoc StaticLoc; ///< Location of the 'static/class' keyword, if present.
   SourceLoc VarLoc;    ///< Location of the 'var' keyword.
 
-  unsigned numPatternEntries;
-
   friend class Decl;
   
   PatternBindingDecl(SourceLoc StaticLoc, StaticSpellingKind StaticSpelling,
@@ -1880,13 +1753,22 @@ public:
                                     Pattern *Pat, Expr *E,
                                     DeclContext *Parent);
 
+  static PatternBindingDecl *createDeserialized(
+                               ASTContext &Ctx, SourceLoc StaticLoc,
+                               StaticSpellingKind StaticSpelling,
+                               SourceLoc VarLoc,
+                               unsigned NumPatternEntries,
+                               DeclContext *Parent);
+
   SourceLoc getStartLoc() const {
     return StaticLoc.isValid() ? StaticLoc : VarLoc;
   }
   SourceLoc getLoc() const { return VarLoc; }
   SourceRange getSourceRange() const;
 
-  unsigned getNumPatternEntries() const { return numPatternEntries; }
+  unsigned getNumPatternEntries() const {
+    return PatternBindingDeclBits.NumPatternEntries;
+  }
   
   ArrayRef<PatternBindingEntry> getPatternList() const {
     return const_cast<PatternBindingDecl*>(this)->getMutablePatternList();
@@ -1908,7 +1790,7 @@ public:
     return getPatternList()[i].getPattern();
   }
   
-  void setPattern(unsigned i, Pattern *Pat);
+  void setPattern(unsigned i, Pattern *Pat, DeclContext *InitContext);
 
   /// Given that this PBD is the parent pattern for the specified VarDecl,
   /// return the entry of the VarDecl in our PatternList.  For example, in:
@@ -1958,7 +1840,7 @@ public:
 private:
   MutableArrayRef<PatternBindingEntry> getMutablePatternList() {
     // Pattern entries are tail allocated.
-    return {getTrailingObjects<PatternBindingEntry>(), numPatternEntries};
+    return {getTrailingObjects<PatternBindingEntry>(), getNumPatternEntries()};
   }
 };
   
@@ -2084,7 +1966,7 @@ public:
 class ValueDecl : public Decl {
   DeclName Name;
   SourceLoc NameLoc;
-  llvm::PointerIntPair<Type, 2, OptionalEnum<Accessibility>> TypeAndAccess;
+  llvm::PointerIntPair<Type, 3, OptionalEnum<Accessibility>> TypeAndAccess;
 
 protected:
   ValueDecl(DeclKind K,
@@ -2167,15 +2049,42 @@ public:
     return TypeAndAccess.getInt().hasValue();
   }
 
+  /// \see getFormalAccess
+  Accessibility getFormalAccessImpl(const DeclContext *useDC) const;
+
   /// Returns the access level specified explicitly by the user, or provided by
   /// default according to language rules.
   ///
   /// This is the access used when calculating if access control is being used
-  /// consistently.
-  Accessibility getFormalAccess() const {
+  /// consistently. If \p useDC is provided (the location where the value is
+  /// being used), features that affect formal access such as \c \@testable are
+  /// taken into account.
+  ///
+  /// \sa getFormalAccessScope
+  Accessibility getFormalAccess(const DeclContext *useDC = nullptr) const {
     assert(hasAccessibility() && "accessibility not computed yet");
-    return TypeAndAccess.getInt().getValue();
+    Accessibility result = TypeAndAccess.getInt().getValue();
+    if (useDC && (result == Accessibility::Internal ||
+                  result == Accessibility::Public))
+      return getFormalAccessImpl(useDC);
+    return result;
   }
+
+  /// Returns the outermost DeclContext from which this declaration can be
+  /// accessed, or null if the declaration is public.
+  ///
+  /// This is used when calculating if access control is being used
+  /// consistently. If \p useDC is provided (the location where the value is
+  /// being used), features that affect formal access such as \c \@testable are
+  /// taken into account.
+  ///
+  /// \invariant
+  /// <code>value.isAccessibleFrom(value.getFormalAccessScope())</code>
+  ///
+  /// \sa getFormalAccess
+  /// \sa isAccessibleFrom
+  const DeclContext *
+  getFormalAccessScope(const DeclContext *useDC = nullptr) const;
 
   /// Returns the access level that actually controls how a declaration should
   /// be emitted and may be used.
@@ -2370,6 +2279,12 @@ class GenericTypeDecl : public TypeDecl, public DeclContext {
   /// the parsed representation, and not part of the module file.
   GenericSignature *GenericSig = nullptr;
 
+  /// \brief The generic context of this type.
+  ///
+  /// This is the mapping between interface types and archetypes for the
+  /// generic parameters of this type.
+  GenericEnvironment *GenericEnv = nullptr;
+
   /// \brief Whether or not the generic signature of the type declaration is
   /// currently being validated.
   // TODO: Merge into GenericSig bits.
@@ -2388,7 +2303,10 @@ public:
   void setGenericParams(GenericParamList *params);
 
   /// Set the generic signature of this type.
-  void setGenericSignature(GenericSignature *sig);
+  void setGenericSignature(GenericSignature *sig) {
+    assert(!GenericSig && "Already have generic signature");
+    GenericSig = sig;
+  }
 
   /// Retrieve the innermost generic parameter types.
   ArrayRef<GenericTypeParamType *> getInnermostGenericParamTypes() const {
@@ -2411,14 +2329,23 @@ public:
     return GenericSig;
   }
   
-  void setIsValidatingGenericSignature(bool ivgs = true) {
-    ValidatingGenericSignature = ivgs;
+  void setIsValidatingGenericSignature(bool validating=true) {
+    ValidatingGenericSignature = validating;
   }
   
   bool isValidatingGenericSignature() const {
     return ValidatingGenericSignature;
   }
-  
+
+  /// Retrieve the generic context for this type.
+  GenericEnvironment *getGenericEnvironment() const { return GenericEnv; }
+
+  /// Set the generic context of this type.
+  void setGenericEnvironment(GenericEnvironment *env) {
+    assert(!this->GenericEnv && "already have generic context?");
+    this->GenericEnv = env;
+  }
+
   // Resolve ambiguity due to multiple base classes.
   using TypeDecl::getASTContext;
   using DeclContext::operator new;
@@ -2686,6 +2613,8 @@ enum { NumOptionalTypeKinds = 2 };
   
 // Kinds of pointer types.
 enum PointerTypeKind : unsigned {
+  PTK_UnsafeMutableRawPointer,
+  PTK_UnsafeRawPointer,
   PTK_UnsafeMutablePointer,
   PTK_UnsafePointer,
   PTK_AutoreleasingUnsafeMutablePointer,
@@ -2847,12 +2776,15 @@ public:
     return SearchedForFailableInits;
   }
 
-  /// getDeclaredType - Retrieve the type declared by this entity.
-  Type getDeclaredType() const { return DeclaredTy; }
-
-  /// Compute the type (and declared type) of this nominal type.
+  /// Compute the type of this nominal type.
   void computeType();
 
+  /// getDeclaredType - Retrieve the type declared by this entity, without
+  /// any generic parameters bound if this is a generic type.
+  Type getDeclaredType() const;
+
+  /// getDeclaredType - Retrieve the type declared by this entity, with
+  /// context archetypes bound if this is a generic type.
   Type getDeclaredTypeInContext() const;
 
   /// Get the "interface" type of the given nominal type, which is the
@@ -3209,9 +3141,7 @@ public:
   ClassDecl *getSuperclassDecl() const;
 
   /// Set the superclass of this class.
-  void setSuperclass(Type superclass) {
-    LazySemanticInfo.Superclass.setPointerAndInt(superclass, true);
-  }
+  void setSuperclass(Type superclass);
 
   /// Retrieve the status of circularity checking for class inheritance.
   CircularityCheck getCircularityCheck() const {
@@ -3235,6 +3165,19 @@ public:
     ClassDeclBits.RequiresStoredPropertyInits = requiresInits;
   }
 
+  /// \see getForeignClassKind
+  enum class ForeignKind : uint8_t {
+    /// A normal Swift or Objective-C class.
+    Normal = 0,
+    /// An imported Core Foundation type. These are AnyObject-compatible but
+    /// do not have runtime metadata.
+    CFType,
+    /// An imported Objective-C type whose class and metaclass symbols are not
+    /// both available at link-time but can be accessed through the Objective-C
+    /// runtime.
+    RuntimeOnly
+  };
+
   /// Whether this class is "foreign", meaning that it is implemented
   /// by a runtime that Swift does not have first-class integration
   /// with.  This generally means that:
@@ -3245,11 +3188,18 @@ public:
   ///
   /// We may find ourselves wanting to break this bit into more
   /// precise chunks later.
-  bool isForeign() const {
-    return ClassDeclBits.Foreign;
+  ForeignKind getForeignClassKind() const {
+    return static_cast<ForeignKind>(ClassDeclBits.RawForeignKind);
   }
-  void setForeign(bool isForeign = true) {
-    ClassDeclBits.Foreign = isForeign;
+  void setForeignClassKind(ForeignKind kind) {
+    ClassDeclBits.RawForeignKind = static_cast<unsigned>(kind);
+  }
+
+  /// Returns true if this class is any kind of "foreign class".
+  ///
+  /// \see getForeignClassKind
+  bool isForeign() const {
+    return getForeignClassKind() != ForeignKind::Normal;
   }
 
   /// Find a method of a class that overrides a given method.
@@ -3291,10 +3241,6 @@ public:
   /// Retrieve the name to use for this class when interoperating with
   /// the Objective-C runtime.
   StringRef getObjCRuntimeName(llvm::SmallVectorImpl<char> &buffer) const;
-
-  /// Determine whether the class is only visible to the Objective-C runtime
-  /// and not to the linker.
-  bool isOnlyObjCRuntimeVisible() const;
 
   /// Returns the appropriate kind of entry point to generate for this class,
   /// based on its attributes.
@@ -3437,7 +3383,8 @@ public:
   bool inheritsFrom(const ProtocolDecl *Super) const;
   
   ProtocolType *getDeclaredType() const {
-    return reinterpret_cast<ProtocolType *>(DeclaredTy.getPointer());
+    return reinterpret_cast<ProtocolType *>(
+      NominalTypeDecl::getDeclaredType().getPointer());
   }
   
   SourceLoc getStartLoc() const { return ProtocolLoc; }
@@ -3587,6 +3534,10 @@ public:
   /// FIXME: protocol extensions will introduce a where clause here as well.
   GenericParamList *createGenericParams(DeclContext *dc);
 
+  /// Create the generic parameters of this protocol if the haven't been
+  /// created yet.
+  void createGenericParamsIfMissing();
+
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) {
     return D->getKind() == DeclKind::Protocol;
@@ -3683,7 +3634,7 @@ enum class AccessStrategy : unsigned char {
 /// Information about a behavior instantiated by a storage declaration.
 ///
 /// TODO: Accessors, composed behaviors
-struct BehaviorRecord {
+struct alignas(1 << 3) BehaviorRecord {
   // The behavior name.
   TypeRepr *ProtocolName;
   // The parameter expression, if any.
@@ -3790,7 +3741,7 @@ private:
   struct GetSetRecord;
   
   /// This is stored immediately before the GetSetRecord.
-  struct AddressorRecord {
+  struct alignas(1 << 3) AddressorRecord {
     FuncDecl *Address = nullptr;        // User-defined address accessor
     FuncDecl *MutableAddress = nullptr; // User-defined mutableAddress accessor
 
@@ -3802,7 +3753,7 @@ private:
   void configureAddressorRecord(AddressorRecord *record,
                                FuncDecl *addressor, FuncDecl *mutableAddressor);
 
-  struct GetSetRecord {
+  struct alignas(1 << 3) GetSetRecord {
     SourceRange Braces;
     FuncDecl *Get = nullptr;       // User-defined getter
     FuncDecl *Set = nullptr;       // User-defined setter
@@ -3827,8 +3778,8 @@ private:
   void configureObservingRecord(ObservingRecord *record,
                                 FuncDecl *willSet, FuncDecl *didSet);
 
-  llvm::PointerIntPair<GetSetRecord*, 2, OptionalEnum<Accessibility>> GetSetInfo;
-  llvm::PointerIntPair<BehaviorRecord*, 2, OptionalEnum<Accessibility>>
+  llvm::PointerIntPair<GetSetRecord*, 3, OptionalEnum<Accessibility>> GetSetInfo;
+  llvm::PointerIntPair<BehaviorRecord*, 3, OptionalEnum<Accessibility>>
     BehaviorInfo;
 
   ObservingRecord &getDidSetInfo() const {
@@ -4191,6 +4142,9 @@ protected:
     setType(Ty);
   }
 
+  /// This is the type specified, including location information.
+  TypeLoc typeLoc;
+
 public:
   VarDecl(bool IsStatic, bool IsLet, SourceLoc NameLoc, Identifier Name,
           Type Ty, DeclContext *DC)
@@ -4205,6 +4159,9 @@ public:
   bool isUserAccessible() const {
     return VarDeclBits.IsUserAccessible;
   }
+  
+  TypeLoc &getTypeLoc() { return typeLoc; }
+  TypeLoc getTypeLoc() const { return typeLoc; }
 
   /// Retrieve the source range of the variable type, or an invalid range if the
   /// variable's type is not explicitly written in the source.
@@ -4302,6 +4259,11 @@ public:
   /// Return the Objective-C runtime name for this property.
   Identifier getObjCPropertyName() const;
 
+  /// Retrieve the default Objective-C selector for the getter of a
+  /// property of the given name.
+  static ObjCSelector getDefaultObjCGetterSelector(ASTContext &ctx,
+                                                   Identifier propertyName);
+
   /// Retrieve the default Objective-C selector for the setter of a
   /// property of the given name.
   static ObjCSelector getDefaultObjCSetterSelector(ASTContext &ctx,
@@ -4327,11 +4289,13 @@ class ParamDecl : public VarDecl {
   SourceLoc ArgumentNameLoc;
   SourceLoc LetVarInOutLoc;
 
-  /// This is the type specified, including location information.
-  TypeLoc typeLoc;
-  
+  struct StoredDefaultArgument {
+    Expr *DefaultArg = nullptr;
+    Initializer *InitContext = nullptr;
+  };
+
   /// The default value, if any, along with whether this is varargs.
-  llvm::PointerIntPair<ExprHandle *, 1, bool> DefaultValueAndIsVariadic;
+  llvm::PointerIntPair<StoredDefaultArgument *, 1> DefaultValueAndIsVariadic;
   
   /// True if the type is implicitly specified in the source, but this has an
   /// apparently valid typeRepr.  This is used in accessors, which look like:
@@ -4363,9 +4327,6 @@ public:
   SourceLoc getArgumentNameLoc() const { return ArgumentNameLoc; }
 
   SourceLoc getLetVarInOutLoc() const { return LetVarInOutLoc; }
-  
-  TypeLoc &getTypeLoc() { return typeLoc; }
-  TypeLoc getTypeLoc() const { return typeLoc; }
 
   bool isTypeLocImplicit() const { return IsTypeLocImplicit; }
   void setIsTypeLocImplicit(bool val) { IsTypeLocImplicit = val; }
@@ -4380,12 +4341,22 @@ public:
     defaultArgumentKind = K;
   }
   
-  void setDefaultValue(ExprHandle *H) {
-    DefaultValueAndIsVariadic.setPointer(H);
+  Expr *getDefaultValue() const {
+    if (auto stored = DefaultValueAndIsVariadic.getPointer())
+      return stored->DefaultArg;
+    return nullptr;
   }
-  ExprHandle *getDefaultValue() const {
-    return DefaultValueAndIsVariadic.getPointer();
+
+  void setDefaultValue(Expr *E);
+
+  Initializer *getDefaultArgumentInitContext() const {
+    if (auto stored = DefaultValueAndIsVariadic.getPointer())
+      return stored->InitContext;
+    return nullptr;
   }
+
+  void setDefaultArgumentInitContext(Initializer *initContext);
+
   /// Whether or not this parameter is varargs.
   bool isVariadic() const { return DefaultValueAndIsVariadic.getInt(); }
   void setVariadic(bool value = true) {DefaultValueAndIsVariadic.setInt(value);}
@@ -4611,6 +4582,7 @@ protected:
 
   GenericParamList *GenericParams;
   GenericSignature *GenericSig;
+  GenericEnvironment *GenericEnv;
 
   CaptureInfo Captures;
 
@@ -4627,7 +4599,7 @@ protected:
       : ValueDecl(Kind, Parent, Name, NameLoc),
         DeclContext(DeclContextKind::AbstractFunctionDecl, Parent),
         Body(nullptr), GenericParams(nullptr), GenericSig(nullptr),
-        ThrowsLoc(ThrowsLoc) {
+        GenericEnv(nullptr), ThrowsLoc(ThrowsLoc) {
     setBodyKind(BodyKind::None);
     setGenericParams(GenericParams);
     AbstractFunctionDeclBits.NumParameterLists = NumParameterLists;
@@ -4652,6 +4624,15 @@ public:
   
   GenericSignature *getGenericSignature() const {
     return GenericSig;
+  }
+
+  /// Retrieve the generic context for this function.
+  GenericEnvironment *getGenericEnvironment() const { return GenericEnv; }
+
+  /// Set the generic context of this function.
+  void setGenericEnvironment(GenericEnvironment *GenericEnv) {
+    assert(!this->GenericEnv && "already have generic context?");
+    this->GenericEnv = GenericEnv;
   }
 
   // Expose our import as member status
@@ -4787,33 +4768,11 @@ public:
   /// depending on the function context.
   bool argumentNameIsAPIByDefault() const;
 
+  /// \brief Returns the "natural" number of argument clauses taken by this
+  /// function.  This value is one for free-standing functions, and two for
+  /// methods.
   unsigned getNumParameterLists() const {
     return AbstractFunctionDeclBits.NumParameterLists;
-  }
-
-  /// \brief Returns the "natural" number of argument clauses taken by this
-  /// function.  This value is always at least one, and it may be more if the
-  /// function is implicitly or explicitly curried.
-  ///
-  /// For example, this function:
-  /// \code
-  ///   func negate(x : Int) -> Int { return -x }
-  /// \endcode
-  /// has a natural argument count of 1 if it is freestanding.  If it is
-  /// a method, it has a natural argument count of 2, as does this
-  /// curried function:
-  /// \code
-  ///   func add(x : Int)(y : Int) -> Int { return x + y }
-  /// \endcode
-  ///
-  /// This value never exceeds the number of chained function types
-  /// in the function's type, but it can be less for functions which
-  /// return a value of function type:
-  /// \code
-  ///   func const(x : Int) -> () -> Int { return { x } } // NAC==1
-  /// \endcode
-  unsigned getNaturalArgumentCount() const {
-    return getNumParameterLists();
   }
 
   /// \brief Returns the parameter pattern(s) for the function definition that
@@ -4945,8 +4904,8 @@ class FuncDecl final : public AbstractFunctionDecl,
   /// \brief If this FuncDecl is an accessor for a property, this indicates
   /// which property and what kind of accessor.
   llvm::PointerIntPair<AbstractStorageDecl*, 3, AccessorKind> AccessorDecl;
-  llvm::PointerUnion3<FuncDecl *, NominalTypeDecl*, BehaviorRecord *>
-    OverriddenOrDerivedForOrBehaviorParamDecl;
+  llvm::PointerUnion<FuncDecl *, BehaviorRecord *>
+    OverriddenOrBehaviorParamDecl;
   llvm::PointerIntPair<OperatorDecl *, 3,
                        AddressorKind> OperatorAndAddressorKind;
 
@@ -4963,9 +4922,10 @@ class FuncDecl final : public AbstractFunctionDecl,
                            NumParameterLists, GenericParams),
       StaticLoc(StaticLoc), FuncLoc(FuncLoc),
       AccessorKeywordLoc(AccessorKeywordLoc),
-      OverriddenOrDerivedForOrBehaviorParamDecl(),
+      OverriddenOrBehaviorParamDecl(),
       OperatorAndAddressorKind(nullptr, AddressorKind::NotAddressor) {
-    FuncDeclBits.IsStatic = StaticLoc.isValid() || getName().isOperator();
+    FuncDeclBits.IsStatic =
+      StaticLoc.isValid() || StaticSpelling != StaticSpellingKind::None;
     FuncDeclBits.StaticSpelling = static_cast<unsigned>(StaticSpelling);
     assert(NumParameterLists > 0 && "Must have at least an empty tuple arg");
     setType(Ty);
@@ -5204,48 +5164,32 @@ public:
   
   /// Get the supertype method this method overrides, if any.
   FuncDecl *getOverriddenDecl() const {
-    return OverriddenOrDerivedForOrBehaviorParamDecl.dyn_cast<FuncDecl *>();
+    return OverriddenOrBehaviorParamDecl.dyn_cast<FuncDecl *>();
   }
   void setOverriddenDecl(FuncDecl *over) {
     // A function cannot be an override if it is also a derived global decl
     // (since derived decls are at global scope).
-    assert((!OverriddenOrDerivedForOrBehaviorParamDecl
-            || !OverriddenOrDerivedForOrBehaviorParamDecl.is<FuncDecl*>())
+    assert((!OverriddenOrBehaviorParamDecl
+            || !OverriddenOrBehaviorParamDecl.is<FuncDecl*>())
          && "function can only be one of override, derived, or behavior param");
-    OverriddenOrDerivedForOrBehaviorParamDecl = over;
+    OverriddenOrBehaviorParamDecl = over;
     over->setIsOverridden();
-  }
-  
-  /// Get the type this function was implicitly generated on the behalf of for
-  /// a derived protocol conformance, if any.
-  NominalTypeDecl *getDerivedForTypeDecl() const {
-    return OverriddenOrDerivedForOrBehaviorParamDecl
-      .dyn_cast<NominalTypeDecl *>();
-  }
-  void setDerivedForTypeDecl(NominalTypeDecl *ntd) {
-    // A function cannot be an override if it is also a derived global decl
-    // (since derived decls are at global scope).
-    assert((!OverriddenOrDerivedForOrBehaviorParamDecl
-            || !OverriddenOrDerivedForOrBehaviorParamDecl
-                  .is<NominalTypeDecl *>())
-         && "function can only be one of override, derived, or behavior param");
-    OverriddenOrDerivedForOrBehaviorParamDecl = ntd;
   }
   
   /// Get the property behavior this function serves as a parameter for, if
   /// any.
   BehaviorRecord *getParamBehavior() const {
-    return OverriddenOrDerivedForOrBehaviorParamDecl
+    return OverriddenOrBehaviorParamDecl
       .dyn_cast<BehaviorRecord *>();
   }
   
   void setParamBehavior(BehaviorRecord *behavior) {
     // Behavior param blocks cannot be overrides or derived.
-    assert((!OverriddenOrDerivedForOrBehaviorParamDecl
-            || !OverriddenOrDerivedForOrBehaviorParamDecl
+    assert((!OverriddenOrBehaviorParamDecl
+            || !OverriddenOrBehaviorParamDecl
                   .is<BehaviorRecord *>())
          && "function can only be one of override, derived, or behavior param");
-    OverriddenOrDerivedForOrBehaviorParamDecl = behavior;
+    OverriddenOrBehaviorParamDecl = behavior;
   }
   
   OperatorDecl *getOperatorDecl() const {
@@ -5485,9 +5429,6 @@ class ConstructorDecl : public AbstractFunctionDecl {
 
   ParameterList *ParameterLists[2];
 
-  /// The type of the initializing constructor.
-  Type InitializerType;
-
   /// The interface type of the initializing constructor.
   Type InitializerInterfaceType;
 
@@ -5518,10 +5459,6 @@ public:
 
   /// \brief Get the type of the constructed object.
   Type getResultType() const;
-
-  /// Get the type of the initializing constructor.
-  Type getInitializerType() const { return InitializerType; }
-  void setInitializerType(Type t) { InitializerType = t; }
 
   /// Get the interface type of the initializing constructor.
   Type getInitializerInterfaceType();
@@ -5730,9 +5667,192 @@ public:
   }
 };
 
+/// Declares a precedence group.  For example:
+///
+/// \code
+/// precedencegroup MultiplicativePrecedence {
+///   associativity: right
+///   higherThan: AdditivePrecedence
+/// }
+/// \endcode
+class PrecedenceGroupDecl : public Decl {
+public:
+  struct Relation {
+    SourceLoc NameLoc;
+    Identifier Name;
+    PrecedenceGroupDecl *Group;
+  };
+
+private:
+  SourceLoc PrecedenceGroupLoc, NameLoc, LBraceLoc, RBraceLoc;
+  SourceLoc AssociativityKeywordLoc, AssociativityValueLoc;
+  SourceLoc AssignmentKeywordLoc, AssignmentValueLoc;
+  SourceLoc HigherThanLoc, LowerThanLoc;
+  Identifier Name;
+  unsigned NumHigherThan, NumLowerThan;
+  // Tail-allocated array of Relations
+
+  Relation *getHigherThanBuffer() {
+    return reinterpret_cast<Relation*>(this + 1);
+  }
+  const Relation *getHigherThanBuffer() const {
+    return reinterpret_cast<const Relation*>(this + 1);
+  }
+  Relation *getLowerThanBuffer() {
+    return getHigherThanBuffer() + NumHigherThan;
+  }
+  const Relation *getLowerThanBuffer() const {
+    return getHigherThanBuffer() + NumHigherThan;
+  }
+
+  PrecedenceGroupDecl(DeclContext *DC,
+                      SourceLoc precedenceGroupLoc,
+                      SourceLoc nameLoc, Identifier name,
+                      SourceLoc lbraceLoc,
+                      SourceLoc associativityKeywordLoc,
+                      SourceLoc associativityValueLoc,
+                      Associativity associativity,
+                      SourceLoc assignmentKeywordLoc,
+                      SourceLoc assignmentValueLoc,
+                      bool isAssignment,
+                      SourceLoc higherThanLoc, ArrayRef<Relation> higherThan,
+                      SourceLoc lowerThanLoc, ArrayRef<Relation> lowerThan,
+                      SourceLoc rbraceLoc);
+
+public:
+  static PrecedenceGroupDecl *create(DeclContext *dc,
+                                     SourceLoc precedenceGroupLoc,
+                                     SourceLoc nameLoc,
+                                     Identifier name,
+                                     SourceLoc lbraceLoc,
+                                     SourceLoc associativityKeywordLoc,
+                                     SourceLoc associativityValueLoc,
+                                     Associativity associativity,
+                                     SourceLoc assignmentKeywordLoc,
+                                     SourceLoc assignmentValueLoc,
+                                     bool isAssignment,
+                                     SourceLoc higherThanLoc,
+                                     ArrayRef<Relation> higherThan,
+                                     SourceLoc lowerThanLoc,
+                                     ArrayRef<Relation> lowerThan,
+                                     SourceLoc rbraceLoc);
+
+
+  SourceLoc getLoc() const { return NameLoc; }
+  SourceRange getSourceRange() const {
+    return { PrecedenceGroupLoc, RBraceLoc };
+  }
+
+  /// Return the location of 'precedencegroup' in:
+  ///   precedencegroup MultiplicativePrecedence { ... }
+  SourceLoc getPrecedenceGroupLoc() const { return PrecedenceGroupLoc; }
+
+  /// Return the location of 'MultiplicativePrecedence' in:
+  ///   precedencegroup MultiplicativePrecedence { ... }
+  SourceLoc getNameLoc() const {
+    return NameLoc;
+  }
+
+  Identifier getName() const {
+    return Name;
+  }
+
+  SourceLoc getLBraceLoc() const { return LBraceLoc; }
+  SourceLoc getRBraceLoc() const { return RBraceLoc; }
+
+  bool isAssociativityImplicit() const {
+    return AssociativityKeywordLoc.isInvalid();
+  }
+
+  /// Return the location of 'associativity' in:
+  ///   associativity: left
+  SourceLoc getAssociativityKeywordLoc() const {
+    return AssociativityKeywordLoc;
+  }
+
+  /// Return the location of 'right' in:
+  ///   associativity: right
+  SourceLoc getAssociativityValueLoc() const {
+    return AssociativityValueLoc;
+  }
+
+  Associativity getAssociativity() const {
+    return Associativity(PrecedenceGroupDeclBits.Associativity);
+  }
+  bool isLeftAssociative() const {
+    return getAssociativity() == Associativity::Left;
+  }
+  bool isRightAssociative() const {
+    return getAssociativity() == Associativity::Right;
+  }
+  bool isNonAssociative() const {
+    return getAssociativity() == Associativity::None;
+  }
+
+  bool isAssignmentImplicit() const {
+    return AssignmentKeywordLoc.isInvalid();
+  }
+
+  /// Return the location of 'assignment' in:
+  ///   assignment: true
+  SourceLoc getAssignmentKeywordLoc() const {
+    return AssignmentKeywordLoc;
+  }
+
+  /// Return the location of 'assignment' in:
+  ///   assignment: true
+  SourceLoc getAssignmentValueLoc() const {
+    return AssignmentValueLoc;
+  }
+
+  bool isAssignment() const {
+    return PrecedenceGroupDeclBits.IsAssignment;
+  }
+
+  bool isHigherThanImplicit() const {
+    return HigherThanLoc.isInvalid();
+  }
+
+  /// Return the location of 'higherThan' in:
+  ///   higherThan: AdditivePrecedence
+  SourceLoc getHigherThanLoc() const {
+    return HigherThanLoc;
+  }
+
+  ArrayRef<Relation> getHigherThan() const {
+    return { getHigherThanBuffer(), NumHigherThan };
+  }
+  MutableArrayRef<Relation> getMutableHigherThan() {
+    return { getHigherThanBuffer(), NumHigherThan };
+  }
+
+  bool isLowerThanImplicit() const {
+    return LowerThanLoc.isInvalid();
+  }
+
+  /// Return the location of 'lowerThan' in:
+  ///   lowerThan: MultiplicativePrecedence
+  SourceLoc getLowerThanLoc() const {
+    return LowerThanLoc;
+  }
+
+  ArrayRef<Relation> getLowerThan() const {
+    return { getLowerThanBuffer(), NumLowerThan };
+  }
+  MutableArrayRef<Relation> getMutableLowerThan() {
+    return { getLowerThanBuffer(), NumLowerThan };
+  }
+
+  void collectOperatorKeywordRanges(SmallVectorImpl<CharSourceRange> &Ranges);
+
+  static bool classof(const Decl *D) {
+    return D->getKind() == DeclKind::PrecedenceGroup;
+  }
+};
+
 /// Abstract base class of operator declarations.
 class OperatorDecl : public Decl {
-  SourceLoc OperatorLoc, NameLoc, LBraceLoc, RBraceLoc;
+  SourceLoc OperatorLoc, NameLoc;
   
   Identifier name;
 
@@ -5741,126 +5861,68 @@ public:
                DeclContext *DC,
                SourceLoc OperatorLoc,
                Identifier Name,
-               SourceLoc NameLoc,
-               SourceLoc LBraceLoc,
-               SourceLoc RBraceLoc)
+               SourceLoc NameLoc)
     : Decl(kind, DC),
       OperatorLoc(OperatorLoc), NameLoc(NameLoc),
-      LBraceLoc(LBraceLoc), RBraceLoc(RBraceLoc),
       name(Name) {}
   
   SourceLoc getLoc() const { return NameLoc; }
-  SourceRange getSourceRange() const { return {OperatorLoc, RBraceLoc}; }
 
   SourceLoc getOperatorLoc() const { return OperatorLoc; }
-  SourceLoc getLBraceLoc() const { return LBraceLoc; }
-  SourceLoc getRBraceLoc() const { return RBraceLoc; }
+  SourceLoc getNameLoc() const { return NameLoc; }
   Identifier getName() const { return name; }
   
   static bool classof(const Decl *D) {
     return D->getKind() >= DeclKind::First_OperatorDecl
-      && D->getKind() <= DeclKind::Last_OperatorDecl;
+        && D->getKind() <= DeclKind::Last_OperatorDecl;
   }
 };
 
 /// Declares the behavior of an infix operator. For example:
 ///
 /// \code
-/// infix operator /+/ {
-///   associativity left
-///   precedence 123
-/// }
+/// infix operator /+/ : AdditivePrecedence
 /// \endcode
 class InfixOperatorDecl : public OperatorDecl {
-  SourceLoc AssociativityLoc, AssociativityValueLoc,
-    PrecedenceLoc, PrecedenceValueLoc,
-    AssignmentLoc;
+  SourceLoc ColonLoc, PrecedenceGroupNameLoc;
+  Identifier PrecedenceGroupName;
+  PrecedenceGroupDecl *PrecedenceGroup = nullptr;
 
 public:
   InfixOperatorDecl(DeclContext *DC,
-                    SourceLoc OperatorLoc,
-                    Identifier Name,
-                    SourceLoc NameLoc,
-                    SourceLoc LBraceLoc,
-                    bool IsAssocImplicit,
-                    SourceLoc AssociativityLoc,
-                    SourceLoc AssociativityValueLoc,
-                    bool IsPrecedenceImplicit,
-                    SourceLoc PrecedenceLoc,
-                    SourceLoc PrecedenceValueLoc,
-                    bool IsAssignmentImplicit,
-                    SourceLoc AssignmentLoc,
-                    SourceLoc RBraceLoc,
-                    InfixData InfixData)
-    : OperatorDecl(DeclKind::InfixOperator, DC,
-                   OperatorLoc,
-                   Name,
-                   NameLoc,
-                   LBraceLoc,
-                   RBraceLoc),
-      AssociativityLoc(AssociativityLoc),
-      AssociativityValueLoc(AssociativityValueLoc),
-      PrecedenceLoc(PrecedenceLoc),
-      PrecedenceValueLoc(PrecedenceValueLoc),
-      AssignmentLoc(AssignmentLoc) {
-    if (!InfixData.isValid()) {
-      setInvalid();
-    } else {
-      assert((AssociativityLoc.isInvalid() || !IsAssocImplicit) &&
-             "Associativity cannot be implicit if it came from user source");
-      assert((PrecedenceLoc.isInvalid() || !IsPrecedenceImplicit) &&
-             "Precedence cannot be implicit if it came from user source");
-      InfixOperatorDeclBits.Precedence = InfixData.getPrecedence();
-      InfixOperatorDeclBits.Associativity =
-        static_cast<unsigned>(InfixData.getAssociativity());
-      InfixOperatorDeclBits.Assignment =
-         unsigned(InfixData.isAssignment());
-      InfixOperatorDeclBits.IsPrecedenceImplicit = IsPrecedenceImplicit;
-      InfixOperatorDeclBits.IsAssocImplicit = IsAssocImplicit;
-      InfixOperatorDeclBits.IsAssignmentImplicit = IsAssignmentImplicit;
-    }
+                    SourceLoc operatorLoc,
+                    Identifier name,
+                    SourceLoc nameLoc,
+                    SourceLoc colonLoc,
+                    Identifier precedenceGroupName,
+                    SourceLoc precedenceGroupNameLoc)
+    : OperatorDecl(DeclKind::InfixOperator, DC, operatorLoc, name, nameLoc),
+      ColonLoc(colonLoc), PrecedenceGroupNameLoc(precedenceGroupNameLoc),
+      PrecedenceGroupName(precedenceGroupName) {
+  }
+
+  SourceLoc getEndLoc() const {
+    if (PrecedenceGroupName.empty())
+      return getNameLoc();
+    return PrecedenceGroupNameLoc;
+  }
+  SourceRange getSourceRange() const {
+    return { getOperatorLoc(), getEndLoc() };
   }
   
-  SourceLoc getAssociativityLoc() const { return AssociativityLoc; }
-  SourceLoc getAssociativityValueLoc() const { return AssociativityValueLoc; }
-  SourceLoc getPrecedenceLoc() const { return PrecedenceLoc; }
-  SourceLoc getPrecedenceValueLoc() const { return PrecedenceValueLoc; }
-  SourceLoc getAssignmentLoc() const { return AssignmentLoc; }
+  SourceLoc getColonLoc() const { return ColonLoc; }
+  SourceLoc getPrecedenceGroupNameLoc() const { return PrecedenceGroupNameLoc; }
 
-  unsigned getPrecedence() const {
-    return InfixOperatorDeclBits.Precedence;
+  Identifier getPrecedenceGroupName() const { return PrecedenceGroupName; }
+  PrecedenceGroupDecl *getPrecedenceGroup() const { return PrecedenceGroup; }
+  void setPrecedenceGroup(PrecedenceGroupDecl *PGD) {
+    PrecedenceGroup = PGD;
   }
-
-  Associativity getAssociativity() const {
-    return Associativity(InfixOperatorDeclBits.Associativity);
-  }
-  
-  bool isAssignment() const {
-    return InfixOperatorDeclBits.Assignment;
-  }
-
-  InfixData getInfixData() const {
-    if (isInvalid())
-      return InfixData();
-    return InfixData(getPrecedence(), getAssociativity(), isAssignment());
-  }
-
-  bool isAssociativityImplicit() const {
-    return InfixOperatorDeclBits.IsAssocImplicit;
-  }
-  bool isPrecedenceImplicit() const {
-    return InfixOperatorDeclBits.IsPrecedenceImplicit;
-  }
-  bool isAssignmentImplicit() const {
-    return InfixOperatorDeclBits.IsAssignmentImplicit;
-  }
-
-  void collectOperatorKeywordRanges(SmallVectorImpl<CharSourceRange> &Ranges);
 
   /// True if this decl's attributes conflict with those declared by another
   /// operator.
   bool conflictsWith(InfixOperatorDecl *other) {
-    return getInfixData() != other->getInfixData();
+    return getPrecedenceGroup() != other->getPrecedenceGroup();
   }
   
   static bool classof(const Decl *D) {
@@ -5876,10 +5938,12 @@ public:
 class PrefixOperatorDecl : public OperatorDecl {
 public:
   PrefixOperatorDecl(DeclContext *DC, SourceLoc OperatorLoc, Identifier Name,
-                     SourceLoc NameLoc, SourceLoc LBraceLoc,
-                     SourceLoc RBraceLoc)
-    : OperatorDecl(DeclKind::PrefixOperator, DC,
-                   OperatorLoc, Name, NameLoc, LBraceLoc, RBraceLoc) {}
+                     SourceLoc NameLoc)
+    : OperatorDecl(DeclKind::PrefixOperator, DC, OperatorLoc, Name, NameLoc) {}
+
+  SourceRange getSourceRange() const {
+    return { getOperatorLoc(), getNameLoc() };
+  }
 
   /// True if this decl's attributes conflict with those declared by another
   /// PrefixOperatorDecl.
@@ -5900,11 +5964,13 @@ public:
 class PostfixOperatorDecl : public OperatorDecl {
 public:
   PostfixOperatorDecl(DeclContext *DC, SourceLoc OperatorLoc, Identifier Name,
-                     SourceLoc NameLoc, SourceLoc LBraceLoc,
-                     SourceLoc RBraceLoc)
-    : OperatorDecl(DeclKind::PostfixOperator, DC, OperatorLoc, Name,
-                   NameLoc, LBraceLoc, RBraceLoc) {}
+                     SourceLoc NameLoc)
+    : OperatorDecl(DeclKind::PostfixOperator, DC, OperatorLoc, Name, NameLoc) {}
   
+  SourceRange getSourceRange() const {
+    return { getOperatorLoc(), getNameLoc() };
+  }
+
   /// True if this decl's attributes conflict with those declared by another
   /// PostfixOperatorDecl.
   bool conflictsWith(PostfixOperatorDecl *other) {
@@ -5924,24 +5990,6 @@ inline bool ValueDecl::isSettable(const DeclContext *UseDC,
     return sd->isSettable();
   } else
     return false;
-}
-
-namespace impl {
-  bool isInternalDeclEffectivelyPublic(const ValueDecl *VD);
-}
-
-inline Accessibility ValueDecl::getEffectiveAccess() const {
-  switch (getFormalAccess()) {
-  case Accessibility::Public:
-    return Accessibility::Public;
-  case Accessibility::Internal:
-    if (impl::isInternalDeclEffectivelyPublic(this)) {
-      return Accessibility::Public;
-    }
-    return Accessibility::Internal;
-  case Accessibility::Private:
-    return Accessibility::Private;
-  }
 }
 
 inline Optional<VarDecl *>
@@ -6016,6 +6064,16 @@ inline ArrayRef<Requirement> ExtensionDecl::getGenericRequirements() const {
     return { };
 
   return GenericSig->getRequirements();
+}
+
+inline bool Decl::isPotentiallyOverridable() const {
+  if (isa<VarDecl>(this) ||
+      isa<SubscriptDecl>(this) ||
+      isa<FuncDecl>(this)) {
+    return getDeclContext()->getAsClassOrClassExtensionContext();
+  } else {
+    return false;
+  }
 }
 
 } // end namespace swift

@@ -13,27 +13,28 @@ add_sourcekit_library(SourceKitSwiftLang
           swiftSema swiftBasic swiftSerialization
           swiftOption cmark
     # Clang dependencies.
+      clangIndex
       clangFormat
       clangToolingCore
-      clangIndex
-      clangDriver
       clangFrontendTool
       clangFrontend
+      clangDriver
       clangCodeGen
       clangSerialization
       clangParse
       clangSema
       clangAnalysis
       clangEdit
-      clangRewrite
       clangRewriteFrontend
+      clangRewrite
       clangLex
       clangAST
       clangAPINotes
       clangBasic
-  COMPONENT_DEPENDS ${LLVM_TARGETS_TO_BUILD}
+  LLVM_COMPONENT_DEPENDS ${LLVM_TARGETS_TO_BUILD}
       bitreader
       bitwriter
+      coverage
       debuginfodwarf
       instrumentation
       ipo

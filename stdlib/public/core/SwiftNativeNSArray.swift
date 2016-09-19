@@ -42,7 +42,7 @@ internal class _SwiftNativeNSArrayWithContiguousStorage
 
   // Operate on our contiguous storage
   internal func withUnsafeBufferOfObjects<R>(
-    _ body: @noescape (UnsafeBufferPointer<AnyObject>) throws -> R
+    _ body: (UnsafeBufferPointer<AnyObject>) throws -> R
   ) rethrows -> R {
     _sanityCheckFailure(
       "Must override withUnsafeBufferOfObjects in derived classes")
@@ -82,11 +82,12 @@ extension _SwiftNativeNSArrayWithContiguousStorage : _NSArrayCore {
 
       if objects.isEmpty { return }
 
-      // These objects are "returned" at +0, so treat them as values to
-      // avoid retains.
-      UnsafeMutablePointer<Int>(aBuffer).initializeFrom(
-        UnsafeMutablePointer(objects.baseAddress! + range.location),
-        count: range.length)
+      // These objects are "returned" at +0, so treat them as pointer values to
+      // avoid retains. Copy bytes via a raw pointer to circumvent reference
+      // counting while correctly aliasing with all other pointer types.
+      UnsafeMutableRawPointer(aBuffer).copyBytes(
+        from: objects.baseAddress! + range.location,
+        count: range.length * MemoryLayout<AnyObject>.stride)
     }
   }
 
@@ -137,7 +138,8 @@ extension _SwiftNativeNSArrayWithContiguousStorage : _NSArrayCore {
   internal let _nativeStorage: _ContiguousArrayStorageBase
 
   internal var _heapBufferBridgedPtr: UnsafeMutablePointer<AnyObject?> {
-    return UnsafeMutablePointer(_getUnsafePointerToStoredProperties(self))
+    return _getUnsafePointerToStoredProperties(self).assumingMemoryBound(
+      to: Optional<AnyObject>.self)
   }
 
   internal typealias HeapBufferStorage = _HeapBufferStorage<Int, AnyObject>
@@ -167,9 +169,9 @@ extension _SwiftNativeNSArrayWithContiguousStorage : _NSArrayCore {
   }
 
   internal override func withUnsafeBufferOfObjects<R>(
-    _ body: @noescape (UnsafeBufferPointer<AnyObject>) throws -> R
+    _ body: (UnsafeBufferPointer<AnyObject>) throws -> R
   ) rethrows -> R {
-    repeat {
+    while true {
       var buffer: UnsafeBufferPointer<AnyObject>
       
       // If we've already got a buffer of bridged objects, just use it
@@ -204,7 +206,6 @@ extension _SwiftNativeNSArrayWithContiguousStorage : _NSArrayCore {
       defer { _fixLifetime(self) }
       return try body(buffer)
     }
-    while true
   }
 
   /// Returns the number of elements in the array.
@@ -231,9 +232,15 @@ class _SwiftNativeNSArrayWithContiguousStorage {}
 internal class _ContiguousArrayStorageBase
   : _SwiftNativeNSArrayWithContiguousStorage {
 
+  final var countAndCapacity: _ArrayBody
+
+  init(_doNotCallMeBase: ()) {
+    _sanityCheckFailure("creating instance of _ContiguousArrayStorageBase")
+  }
+  
 #if _runtime(_ObjC)
   internal override func withUnsafeBufferOfObjects<R>(
-    _ body: @noescape (UnsafeBufferPointer<AnyObject>) throws -> R
+    _ body: (UnsafeBufferPointer<AnyObject>) throws -> R
   ) rethrows -> R {
     if let result = try _withVerbatimBridgedUnsafeBuffer(body) {
       return result
@@ -246,7 +253,7 @@ internal class _ContiguousArrayStorageBase
   /// `UnsafeBufferPointer` to the elements and return the result.
   /// Otherwise, return `nil`.
   internal func _withVerbatimBridgedUnsafeBuffer<R>(
-    _ body: @noescape (UnsafeBufferPointer<AnyObject>) throws -> R
+    _ body: (UnsafeBufferPointer<AnyObject>) throws -> R
   ) rethrows -> R? {
     _sanityCheckFailure(
       "Concrete subclasses must implement _withVerbatimBridgedUnsafeBuffer")

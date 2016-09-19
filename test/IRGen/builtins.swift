@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -parse-stdlib -primary-file %s -emit-ir -o - -disable-objc-attr-requires-foundation-module | FileCheck %s --check-prefix=CHECK --check-prefix=CHECK-%target-runtime
+// RUN: %target-swift-frontend -parse-stdlib -primary-file %s -emit-ir -o - -disable-objc-attr-requires-foundation-module | %FileCheck %s --check-prefix=CHECK --check-prefix=CHECK-%target-runtime
 // REQUIRES: executable_test
 
 // REQUIRES: CPU=x86_64
@@ -120,9 +120,9 @@ func !=(lhs: Int, rhs: Int) -> Bool {
   // CHECK: icmp ne i32
 }
 
-func gep_test(_ ptr: Builtin.RawPointer, offset: Builtin.Int64)
+func gepRaw_test(_ ptr: Builtin.RawPointer, offset: Builtin.Int64)
    -> Builtin.RawPointer {
-  return Builtin.gep_Int64(ptr, offset)
+  return Builtin.gepRaw_Int64(ptr, offset)
   // CHECK: getelementptr inbounds i8, i8*
 }
 
@@ -132,6 +132,14 @@ func load_test(_ ptr: Builtin.RawPointer) -> Builtin.Int64 {
   // CHECK-NEXT: load i64, i64* [[CASTPTR]]
   // CHECK: ret
   return Builtin.load(ptr)
+}
+
+// CHECK: define hidden i64 @_TF8builtins13load_raw_test
+func load_raw_test(_ ptr: Builtin.RawPointer) -> Builtin.Int64 {
+  // CHECK: [[CASTPTR:%.*]] = bitcast i8* [[PTR:%.*]] to i64*
+  // CHECK-NEXT: load i64, i64* [[CASTPTR]]
+  // CHECK: ret
+  return Builtin.loadRaw(ptr)
 }
 
 // CHECK: define hidden void @_TF8builtins11assign_test
@@ -146,6 +154,14 @@ func load_object_test(_ ptr: Builtin.RawPointer) -> Builtin.NativeObject {
   // CHECK: call void @rt_swift_retain([[REFCOUNT]]* [[T0]])
   // CHECK: ret [[REFCOUNT]]* [[T0]]
   return Builtin.load(ptr)
+}
+
+// CHECK: define hidden %swift.refcounted* @_TF8builtins20load_raw_object_test
+func load_raw_object_test(_ ptr: Builtin.RawPointer) -> Builtin.NativeObject {
+  // CHECK: [[T0:%.*]] = load [[REFCOUNT]]*, [[REFCOUNT]]**
+  // CHECK: call void @rt_swift_retain([[REFCOUNT]]* [[T0]])
+  // CHECK: ret [[REFCOUNT]]* [[T0]]
+  return Builtin.loadRaw(ptr)
 }
 
 // CHECK: define hidden void @_TF8builtins18assign_object_test
@@ -227,17 +243,6 @@ func generic_strideof_test<T>(_: T) {
   // CHECK-NEXT: [[STRIDE:%.*]] = ptrtoint i8* [[T1]] to i64
   // CHECK-NEXT: store i64 [[STRIDE]], i64* [[S:%.*]]
   var s = Builtin.strideof(T.self)
-}
-
-// CHECK: define hidden void @_TF8builtins29generic_strideof_nonzero_testurFxT_(
-func generic_strideof_nonzero_test<T>(_: T) {
-  // CHECK:      [[T0:%.*]] = getelementptr inbounds i8*, i8** [[T:%.*]], i32 19
-  // CHECK-NEXT: [[T1:%.*]] = load i8*, i8** [[T0]]
-  // CHECK-NEXT: [[STRIDE:%.*]] = ptrtoint i8* [[T1]] to i64
-  // CHECK-NEXT: [[CMP:%.*]] = icmp eq i64 [[STRIDE]], 0
-  // CHECK-NEXT: [[SELECT:%.*]] = select i1 [[CMP]], i64 1, i64 [[STRIDE]]
-  // CHECK-NEXT: store i64 [[SELECT]], i64* [[S:%.*]]
-  var s = Builtin.strideof_nonzero(T.self)
 }
 
 class X {}
@@ -380,7 +385,7 @@ func testCondFail(_ b: Bool, c: Bool) {
 // CHECK-objc:    [[IS_DONE:%.*]] = icmp eq [[WORD]] [[PRED]], -1
 // CHECK-objc:    call void @llvm.assume(i1 [[IS_DONE]])
 
-func testOnce(_ p: Builtin.RawPointer, f: @convention(thin) () -> ()) {
+func testOnce(_ p: Builtin.RawPointer, f: @escaping @convention(thin) () -> ()) {
   Builtin.once(p, f)
 }
 
@@ -392,12 +397,12 @@ struct S {}
 protocol P {}
 
 // CHECK-LABEL: define hidden void @_TF8builtins10canBeClass
-func canBeClass<T>(_ f: (Builtin.Int8) -> (), _: T) {
+func canBeClass<T>(_ f: @escaping (Builtin.Int8) -> (), _: T) {
   // CHECK: call void {{%.*}}(i8 1
   f(Builtin.canBeClass(O.self))
   // CHECK: call void {{%.*}}(i8 1
   f(Builtin.canBeClass(OP1.self))
-  typealias ObjCCompo = protocol<OP1, OP2>
+  typealias ObjCCompo = OP1 & OP2
   // CHECK: call void {{%.*}}(i8 1
   f(Builtin.canBeClass(ObjCCompo.self))
 
@@ -407,7 +412,7 @@ func canBeClass<T>(_ f: (Builtin.Int8) -> (), _: T) {
   f(Builtin.canBeClass(C.self))
   // CHECK: call void {{%.*}}(i8 0
   f(Builtin.canBeClass(P.self))
-  typealias MixedCompo = protocol<OP1, P>
+  typealias MixedCompo = OP1 & P
   // CHECK: call void {{%.*}}(i8 0
   f(Builtin.canBeClass(MixedCompo.self))
 

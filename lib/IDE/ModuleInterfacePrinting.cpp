@@ -32,8 +32,12 @@
 #include "clang/Lex/Lexer.h"
 #include "clang/Lex/MacroInfo.h"
 #include "clang/Lex/Preprocessor.h"
+#include <algorithm>
+#include <memory>
 #include <queue>
+#include <string>
 #include <utility>
+#include <vector>
 
 using namespace swift;
 
@@ -145,6 +149,40 @@ getUnderlyingClangModuleForImport(ImportDecl *Import) {
       return ClangMod;
 
   return nullptr;
+}
+
+static void printTypeNameToString(Type Ty, std::string &Text) {
+  SmallString<128> Buffer;
+  llvm::raw_svector_ostream OS(Buffer);
+  Ty->print(OS);
+  Text = OS.str();
+}
+
+bool swift::ide::
+printTypeInterface(ModuleDecl *M, Type Ty, ASTPrinter &Printer,
+                   std::string &TypeName, std::string &Error) {
+  if (!Ty) {
+    if (Error.empty())
+      Error = "type cannot be null.";
+    return true;
+  }
+  Ty = Ty->getRValueType();
+  if (auto ND = Ty->getNominalOrBoundGenericNominal()) {
+    PrintOptions Options = PrintOptions::printTypeInterface(Ty.getPointer(), M);
+    ND->print(Printer, Options);
+    printTypeNameToString(Ty, TypeName);
+    return false;
+  }
+  Error = "cannot find declaration of type.";
+  return true;
+}
+
+bool swift::ide::
+printTypeInterface(ModuleDecl *M, StringRef TypeUSR, ASTPrinter &Printer,
+                   std::string &TypeName, std::string &Error) {
+  return printTypeInterface(M, getTypeFromMangledSymbolname(M->getASTContext(),
+                                                            TypeUSR, Error),
+                            Printer, TypeName, Error);
 }
 
 void swift::ide::printModuleInterface(Module *M, Optional<StringRef> Group,

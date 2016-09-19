@@ -44,6 +44,9 @@
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Metadata.h"
 #include "swift/Runtime/HeapObject.h"
+#if SWIFT_OBJC_INTEROP
+#include "swift/Runtime/ObjCBridge.h"
+#endif
 #include <cstring>
 #include <type_traits>
 
@@ -373,20 +376,17 @@ struct SwiftWeakRetainableBox :
 };
 
 #if SWIFT_OBJC_INTEROP
-extern "C" void *objc_retain(void *obj);
-extern "C" void objc_release(void *obj);
-
 /// A box implementation class for Objective-C object pointers.
 struct ObjCRetainableBox : RetainableBoxBase<ObjCRetainableBox, void*> {
   static constexpr unsigned numExtraInhabitants =
     swift_getHeapObjectExtraInhabitantCount();
 
   static void *retain(void *obj) {
-    return objc_retain(obj);
+    return objc_retain((id)obj);
   }
 
   static void release(void *obj) {
-    objc_release(obj);
+    objc_release((id)obj);
   }
 };
 
@@ -643,7 +643,9 @@ struct AggregateBox {
   using Helper = AggregateBoxHelper<0, EltBoxes...>;
   static constexpr size_t size = Helper::endOffset;
   static constexpr size_t alignment = Helper::alignment;
-  static constexpr size_t stride = roundUpToAlignment(size, alignment);
+  static constexpr size_t rawStride = roundUpToAlignment(size, alignment);
+  static constexpr size_t stride = rawStride == 0 ? 1 : rawStride;
+
   static constexpr bool isPOD = Helper::isPOD;
   static constexpr bool isBitwiseTakable = Helper::isBitwiseTakable;
 

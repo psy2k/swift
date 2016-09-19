@@ -73,8 +73,6 @@ Rename with a non-`stdlib` naming scheme.
 000000000001cb30 T _swift_allocBox
 000000000001c990 T _swift_allocObject
 000000000001ca60 T _swift_bufferAllocate
-000000000001ca70 T _swift_bufferAllocateOnStack
-000000000001ca80 T _swift_bufferDeallocateFromStack
 000000000001ca90 T _swift_bufferHeaderSize
 000000000001cd30 T _swift_deallocBox
 000000000001d490 T _swift_deallocClassInstance
@@ -251,7 +249,6 @@ process start and the function returns.
 should be implementable in the standard library now.
 
 ```
-0000000000003b60 T _swift_bridgeNonVerbatimFromObjectiveC
 0000000000003c80 T _swift_bridgeNonVerbatimFromObjectiveCConditional
 00000000000037e0 T _swift_bridgeNonVerbatimToObjectiveC
 00000000000039c0 T _swift_getBridgedNonVerbatimObjectiveCType

@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "TestContext.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/Module.h"
@@ -24,80 +25,7 @@
 #include "gtest/gtest.h"
 
 using namespace swift;
-
-namespace {
-/// Helper class used to set the LangOpts target before initializing the
-/// ASTContext.
-///
-/// \see TestContext
-class TestContextBase {
-public:
-  LangOptions LangOpts;
-  SearchPathOptions SearchPathOpts;
-  SourceManager SourceMgr;
-  DiagnosticEngine Diags;
-
-  TestContextBase() : Diags(SourceMgr) {
-    LangOpts.Target = llvm::Triple(llvm::sys::getProcessTriple());
-  }
-};
-
-enum ShouldDeclareOptionalTypes : bool {
-  DoNotDeclareOptionalTypes,
-  DeclareOptionalTypes
-};
-
-/// Owns an ASTContext and the associated types.
-class TestContext : public TestContextBase {
-  SourceFile *FileForLookups;
-
-  void declareOptionalType(Identifier name) {
-    auto wrapped = new (Ctx) GenericTypeParamDecl(File,
-                                                  Ctx.getIdentifier("Wrapped"),
-                                                  SourceLoc(), /*depth*/0,
-                                                  /*index*/0);
-    auto params = GenericParamList::create(Ctx, SourceLoc(), wrapped,
-                                           SourceLoc());
-    auto decl = new (Ctx) EnumDecl(SourceLoc(), name, SourceLoc(),
-                                   /*inherited*/{}, params, File);
-    wrapped->setDeclContext(decl);
-    FileForLookups->Decls.push_back(decl);
-  }
-
-public:
-  ASTContext Ctx;
-  DerivedFileUnit *File;
-
-  TestContext(ShouldDeclareOptionalTypes optionals = DoNotDeclareOptionalTypes)
-      : Ctx(LangOpts, SearchPathOpts, SourceMgr, Diags) {
-    auto stdlibID = Ctx.getIdentifier(STDLIB_NAME);
-    auto *module = ModuleDecl::create(stdlibID, Ctx);
-    Ctx.LoadedModules[stdlibID] = module;
-    File = new (Ctx) DerivedFileUnit(*module);
-
-    if (optionals == DeclareOptionalTypes) {
-      using ImplicitModuleImportKind = SourceFile::ImplicitModuleImportKind;
-      FileForLookups = new (Ctx) SourceFile(*module, SourceFileKind::Library,
-                                            /*buffer*/None,
-                                            ImplicitModuleImportKind::None);
-      module->addFile(*FileForLookups);
-
-      declareOptionalType(Ctx.getIdentifier("Optional"));
-      declareOptionalType(Ctx.getIdentifier("ImplicitlyUnwrappedOptional"));
-    }
-  }
-
-  template <typename Nominal>
-  Nominal *makeNominal(StringRef name,
-                       GenericParamList *genericParams = nullptr) {
-    auto result = new (Ctx) Nominal(SourceLoc(), Ctx.getIdentifier(name),
-                                    SourceLoc(), /*inherited*/{},
-                                    genericParams, File);
-    result->setAccessibility(Accessibility::Internal);
-    return result;
-  }
-};
-} // end anonymous namespace
+using namespace swift::unittest;
 
 TEST(Override, IdenticalTypes) {
   TestContext C;

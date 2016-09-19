@@ -1,6 +1,6 @@
 // RUN: rm -rf %t && mkdir -p %t
 // RUN: %build-silgen-test-overlays
-// RUN: %target-swift-frontend(mock-sdk: -sdk %S/Inputs -I %t) -verify -emit-silgen -I %S/Inputs -disable-objc-attr-requires-foundation-module %s | FileCheck %s
+// RUN: %target-swift-frontend(mock-sdk: -sdk %S/Inputs -I %t) -verify -emit-silgen -I %S/Inputs -disable-objc-attr-requires-foundation-module %s | %FileCheck %s
 
 // REQUIRES: objc_interop
 
@@ -52,9 +52,8 @@ import Foundation
   // TODO: redundant reabstractions here
   // CHECK:         [[BLOCK_THUNK:%.*]] = function_ref @_TTRXFdCb_dCSo8NSString_aS__XFo_oSS_oSS_
   // CHECK:         [[BRIDGED:%.*]] = partial_apply [[BLOCK_THUNK]]([[BLOCK]])
-  // CHECK:         [[REABSTRACT_THUNK:%.*]] = function_ref @_TTRXFo_oSS_oSS_XFo_iSS_iSS_
-  // CHECK:         [[REABSTRACT:%.*]] = partial_apply [[REABSTRACT_THUNK]]([[BRIDGED]])
-  // CHECK:         [[NATIVE:%.*]] = function_ref @_TFC20objc_blocks_bridging3Foo7optFunc{{.*}} : $@convention(method) (@owned Optional<String -> String>, @owned String, @guaranteed Foo) -> @owned Optional<String>
+  // CHECK:         enum $Optional<@callee_owned (@owned String) -> @owned String>, #Optional.some!enumelt.1, [[BRIDGED]]
+  // CHECK:         [[NATIVE:%.*]] = function_ref @_TFC20objc_blocks_bridging3Foo7optFunc{{.*}} : $@convention(method) (@owned Optional<@callee_owned (@owned String) -> @owned String>, @owned String, @guaranteed Foo) -> @owned Optional<String>
   // CHECK:         apply [[NATIVE]]
   dynamic func optFunc(_ f: ((String) -> String)?, x: String) -> String? {
     return f?(x)
@@ -69,9 +68,9 @@ import Foundation
 
 // CHECK-LABEL: sil hidden @_TF20objc_blocks_bridging10callBlocks
 func callBlocks(_ x: Foo,
-  f: (Int) -> Int,
-  g: (String) -> String,
-  h: (String?) -> String?
+  f: @escaping (Int) -> Int,
+  g: @escaping (String) -> String,
+  h: @escaping (String?) -> String?
 ) -> (Int, String, String?, String?) {
   // CHECK: [[FOO:%.*]] =  class_method [volatile] %0 : $Foo, #Foo.foo!1.foreign
   // CHECK: [[F_BLOCK_STORAGE:%.*]] = alloc_stack $@block_storage
@@ -95,7 +94,7 @@ func callBlocks(_ x: Foo,
   // CHECK: apply [[BAS]]([[H_BLOCK]]
 
   // CHECK: [[G_BLOCK:%.*]] = copy_block {{%.*}} : $@convention(block) (NSString) -> @autoreleased NSString
-  // CHECK: enum $Optional<@convention(block) NSString -> NSString>, #Optional.some!enumelt.1, [[G_BLOCK]]
+  // CHECK: enum $Optional<@convention(block) (NSString) -> @autoreleased NSString>, #Optional.some!enumelt.1, [[G_BLOCK]]
 
   return (x.foo(f, x: 0), x.bar(g, x: "one"), x.bas(h, x: "two"), x.optFunc(g, x: "three"))
 }
@@ -110,10 +109,10 @@ class Test: NSObject {
 // CHECK:         [[RESULT:%.*]] = apply {{%.*}}([[CLOSURE]])
 // CHECK:         return [[RESULT]]
 
-func clearDraggingItemImageComponentsProvider(_ x: DraggingItem) {
+func clearDraggingItemImageComponentsProvider(_ x: NSDraggingItem) {
   x.imageComponentsProvider = {}
 }
-// CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_TTRXFo__oGSaPs9AnyObject___XFdCb__aGSqCSo7NSArray__
+// CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_TTRXFo__oGSaP___XFdCb__aGSqCSo7NSArray__
 // CHECK:         [[CONVERT:%.*]] = function_ref @_TFE10FoundationSa19_bridgeToObjectiveCfT_CSo7NSArray
 // CHECK:         [[CONVERTED:%.*]] = apply [[CONVERT]]
 // CHECK:         [[OPTIONAL:%.*]] = enum $Optional<NSArray>, #Optional.some!enumelt.1, [[CONVERTED]]
@@ -136,3 +135,21 @@ func bridgeNoescapeBlock() {
   // CHECK: function_ref @_TTRXFo___XFdCb___
   noescapeNonnullBlockAlias { }
 }
+
+class ObjCClass : NSObject {}
+
+extension ObjCClass {
+  func someDynamicMethod(closure: (() -> ()) -> ()) {}
+}
+
+struct GenericStruct<T> {
+  let closure: (() -> ()) -> ()
+
+  func doStuff(o: ObjCClass) {
+    o.someDynamicMethod(closure: closure)
+  }
+}
+
+// CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_TTRgrXFo_oXFo_____XFdCb_dXFdCb_____ : $@convention(c) @pseudogeneric <T> (@inout_aliasable @block_storage @callee_owned (@owned @callee_owned () -> ()) -> (), @convention(block) () -> ()) -> ()
+// CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_TTRgrXFdCb___XFo___ : $@convention(thin) @pseudogeneric <T> (@owned @convention(block) () -> ()) -> ()
+

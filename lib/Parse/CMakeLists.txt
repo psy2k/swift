@@ -1,4 +1,4 @@
-add_swift_library(swiftParse
+add_swift_library(swiftParse STATIC
   Lexer.cpp
   ParseDecl.cpp
   ParseExpr.cpp
@@ -12,5 +12,6 @@ add_swift_library(swiftParse
   Scope.cpp
   LINK_LIBRARIES
     swiftSIL
-    swiftAST)
+    swiftAST
+)
 

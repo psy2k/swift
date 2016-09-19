@@ -22,6 +22,7 @@
 #include "clang/CodeGen/ObjectFilePCHContainerOperations.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/TextDiagnosticBuffer.h"
+#include "clang/Lex/PreprocessorOptions.h"
 #include "clang/Serialization/ASTReader.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -341,11 +342,12 @@ bool ide::initInvocationByClangArguments(ArrayRef<const char *> ArgList,
     CCArgs.push_back(Entry);
   }
 
-  if (!ClangInvok->getLangOpts()->ImplementationOfModule.empty()) {
+  if (!ClangInvok->getLangOpts()->CompilingModule) {
     CCArgs.push_back("-Xclang");
-    CCArgs.push_back("-fmodule-implementation-of");
-    CCArgs.push_back("-Xclang");
-    CCArgs.push_back(ClangInvok->getLangOpts()->ImplementationOfModule);
+    llvm::SmallString<64> Str;
+    Str += "-fmodule-name=";
+    Str += ClangInvok->getLangOpts()->CurrentModule;
+    CCArgs.push_back(Str.str());
   }
 
   if (PPOpts.DetailedRecord) {

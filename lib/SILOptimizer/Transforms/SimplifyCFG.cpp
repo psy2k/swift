@@ -2121,18 +2121,22 @@ static bool tryMoveCondFailToPreds(SILBasicBlock *BB) {
     // execute the cond_fail speculatively.
     if (!Pred->getSingleSuccessor())
       return false;
-    
+
+    // If we already found a constant pred, we do not need to check the incoming
+    // value to see if it is constant. We are already going to perform the
+    // optimization.
+    if (somePredsAreConst)
+      continue;
+
     SILValue incoming = condArg->getIncomingValue(Pred);
-    if (isa<IntegerLiteralInst>(incoming)) {
-      somePredsAreConst = true;
-      break;
-    }
+    somePredsAreConst |= isa<IntegerLiteralInst>(incoming);
   }
+
   if (!somePredsAreConst)
     return false;
-  
+
   DEBUG(llvm::dbgs() << "move to predecessors: " << *CFI);
-  
+
   // Move the cond_fail to the predecessor blocks.
   for (auto *Pred : BB->getPreds()) {
     SILValue incoming = condArg->getIncomingValue(Pred);
@@ -3186,6 +3190,7 @@ bool simplifyToSelectValue(SILBasicBlock *MergeBlock, unsigned ArgNum,
   }
   
   SmallVector<std::pair<SILValue, SILValue>, 8> Cases;
+  llvm::SmallDenseMap<SILValue, SILValue> CaseLiteralsToResultMap;
   SILValue defaultResult;
   
   // The block of the first input value compare. It dominates all other blocks
@@ -3198,7 +3203,23 @@ bool simplifyToSelectValue(SILBasicBlock *MergeBlock, unsigned ArgNum,
       auto *BrInst = cast<CondBranchInst>(CaseInfo.CmpOrDefault->getTerminator());
       if (FoundCmpBlocks.count(BrInst->getFalseBB()) != 1)
         return false;
-      Cases.push_back({CaseInfo.Literal, CaseInfo.Result});
+      // Ignore duplicate cases
+      if (CaseLiteralsToResultMap.find(CaseInfo.Literal) ==
+          CaseLiteralsToResultMap.end()) {
+        CaseLiteralsToResultMap.insert({CaseInfo.Literal, CaseInfo.Result});
+        Cases.push_back({CaseInfo.Literal, CaseInfo.Result});
+      } else {
+        // Check if the result value matches
+        EnumInst *PrevResult =
+            dyn_cast<EnumInst>(CaseLiteralsToResultMap[CaseInfo.Literal]);
+        assert(PrevResult && "Prev. case result is not an EnumInst");
+        EnumInst *CurrResult = dyn_cast<EnumInst>(CaseInfo.Result);
+        assert(CurrResult && "Curr. case result is not an EnumInst");
+        if (PrevResult->getElement() != CurrResult->getElement()) {
+          // result value does not match - bail
+          return false;
+        }
+      }
       SILBasicBlock *Pred = CaseInfo.CmpOrDefault->getSinglePredecessor();
       if (!Pred || FoundCmpBlocks.count(Pred) == 0) {
         // There may be only a single block whose predecessor we didn't see. And
@@ -3504,6 +3525,22 @@ public:
   StringRef getName() override { return "SROA BB Arguments"; }
 };
 
+// Used to test tryMoveCondFailToPreds with sil-opt
+class MoveCondFailToPreds : public SILFunctionTransform {
+public:
+  MoveCondFailToPreds() {}
+  void run() override {
+    for (auto &BB : *getFunction()) {
+      if (tryMoveCondFailToPreds(&BB)) {
+        invalidateAnalysis(
+            SILAnalysis::InvalidationKind::BranchesAndInstructions);
+      }
+    }
+  }
+
+  StringRef getName() override { return "Move Cond Fail To Preds"; }
+};
+
 } // End anonymous namespace.
 
 /// Splits all critical edges in a function.
@@ -3522,4 +3559,9 @@ SILTransform *swift::createSROABBArgs() { return new SROABBArgs(); }
 // Simplifies basic block arguments.
 SILTransform *swift::createSimplifyBBArgs() {
   return new SimplifyBBArgs();
+}
+
+// Moves cond_fail instructions to predecessors.
+SILTransform *swift::createMoveCondFailToPreds() {
+  return new MoveCondFailToPreds();
 }

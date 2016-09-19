@@ -25,6 +25,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <string.h>
 #include "swift/Runtime/Config.h"
 #include "swift/ABI/MetadataValues.h"
 #include "swift/ABI/System.h"
@@ -133,6 +134,7 @@ using TargetFarRelativeIndirectablePointer
   = typename Runtime::template FarRelativeIndirectablePointer<Pointee,Nullable>;
 
 struct HeapObject;
+struct WeakReference;
   
 template <typename Runtime> struct TargetMetadata;
 using Metadata = TargetMetadata<InProcess>;
@@ -1089,6 +1091,13 @@ template <typename Runtime> struct TargetOpaqueMetadata;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winvalid-offsetof"
 
+extern uint64_t RelativeDirectPointerNullPtr;
+
+#define RelativeDirectPointerNullPtrRef                                        \
+  *reinterpret_cast<ConstTargetFarRelativeDirectPointer<                       \
+      Runtime, TargetNominalTypeDescriptor, /*nullable*/ true> *>(             \
+      &RelativeDirectPointerNullPtr)
+
 /// The common structure of all type metadata.
 template <typename Runtime>
 struct TargetMetadata {
@@ -1221,16 +1230,17 @@ public:
   
   /// Get the nominal type descriptor if this metadata describes a nominal type,
   /// or return null if it does not.
-  ConstTargetFarRelativeDirectPointer<Runtime, TargetNominalTypeDescriptor,
-                                      /*nullable*/ true>
+  const ConstTargetFarRelativeDirectPointer<Runtime,
+                                            TargetNominalTypeDescriptor,
+                                            /*nullable*/ true> &
   getNominalTypeDescriptor() const {
     switch (getKind()) {
     case MetadataKind::Class: {
       const auto cls = static_cast<const TargetClassMetadata<Runtime> *>(this);
       if (!cls->isTypeMetadata())
-        return 0;
+        return RelativeDirectPointerNullPtrRef;
       if (cls->isArtificialSubclass())
-        return 0;
+        return RelativeDirectPointerNullPtrRef;
       return cls->getDescription();
     }
     case MetadataKind::Struct:
@@ -1248,7 +1258,7 @@ public:
     case MetadataKind::HeapLocalVariable:
     case MetadataKind::HeapGenericLocalVariable:
     case MetadataKind::ErrorObject:
-      return 0;
+      return RelativeDirectPointerNullPtrRef;
     }
   }
   
@@ -1559,6 +1569,22 @@ struct TargetClassMetadata : public TargetHeapMetadata<Runtime> {
       Reserved(0), ClassSize(classSize), ClassAddressPoint(classAddressPoint),
       Description(nullptr), IVarDestroyer(ivarDestroyer) {}
 
+  // Description's copy ctor is deleted so we have to do this the hard way.
+  TargetClassMetadata(const TargetClassMetadata& other)
+    : TargetHeapMetadata<Runtime>(other),
+      SuperClass(other.SuperClass),
+      CacheData{other.CacheData[0], other.CacheData[1]},
+      Data(other.Data),
+      Flags(other.Flags),
+      InstanceAddressPoint(other.InstanceAddressPoint),
+      InstanceSize(other.InstanceSize),
+      InstanceAlignMask(other.InstanceAlignMask),
+      Reserved(other.Reserved),
+      ClassSize(other.ClassSize),
+      ClassAddressPoint(other.ClassAddressPoint),
+      Description(other.Description.get()),
+      IVarDestroyer(other.IVarDestroyer) {}
+
   /// The metadata for the superclass.  This is null for the root class.
   ConstTargetMetadataPointer<Runtime, swift::TargetClassMetadata> SuperClass;
 
@@ -1634,8 +1660,10 @@ private:
   //   - "tabulated" virtual methods
 
 public:
-  ConstTargetFarRelativeDirectPointer<Runtime, TargetNominalTypeDescriptor,
-  /*nullable*/ true> getDescription() const {
+  const ConstTargetFarRelativeDirectPointer<Runtime,
+                                            TargetNominalTypeDescriptor,
+                                            /*nullable*/ true> &
+  getDescription() const {
     assert(isTypeMetadata());
     assert(!isArtificialSubclass());
     return Description;
@@ -1816,6 +1844,8 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
   using StoredSize = typename Runtime::StoredSize;
   using InitializationFunction_t =
     void (*)(TargetForeignTypeMetadata<Runtime> *selectedMetadata);
+  using RuntimeMetadataPointer =
+      ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>;
 
   /// Foreign type metadata may have extra header fields depending on
   /// the flags.
@@ -1830,14 +1860,12 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
     /// The Swift-mangled name of the type. This is the uniquing key for the
     /// type.
     TargetPointer<Runtime, const char> Name;
-    
+
     /// A pointer to the actual, runtime-uniqued metadata for this
     /// type.  This is essentially an invasive cache for the lookup
     /// structure.
-    mutable std::atomic<
-      ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>
-    > Unique;
-    
+    mutable std::atomic<RuntimeMetadataPointer> Unique;
+
     /// Various flags.
     enum : StoredSize {
       /// This metadata has an initialization callback function.  If
@@ -1856,9 +1884,8 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
     return reinterpret_cast<TargetPointer<Runtime, const char>>(
       asFullMetadata(this)->Name);
   }
-  
-  ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>
-  getCachedUniqueMetadata() const {
+
+  RuntimeMetadataPointer getCachedUniqueMetadata() const {
 #if __alpha__
     // TODO: This can be a relaxed-order load if there is no initialization
     // function. On platforms we care about, consume is no more expensive than
@@ -1869,15 +1896,13 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
 #endif
     return asFullMetadata(this)->Unique.load(SWIFT_MEMORY_ORDER_CONSUME);
   }
-  
-  void
-  setCachedUniqueMetadata(
-    ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata> unique)
-  const {
-    assert((asFullMetadata(this)->Unique == nullptr
-            || asFullMetadata(this)->Unique == unique)
-           && "already set unique metadata");
-    
+
+  void setCachedUniqueMetadata(RuntimeMetadataPointer unique) const {
+    assert((static_cast<RuntimeMetadataPointer>(asFullMetadata(this)->Unique) ==
+                nullptr ||
+            asFullMetadata(this)->Unique == unique) &&
+           "already set unique metadata");
+
     // If there is no initialization function, this can be a relaxed store.
     if (!hasInitializationFunction())
       asFullMetadata(this)->Unique.store(unique, std::memory_order_relaxed);
@@ -1965,6 +1990,10 @@ struct TargetValueMetadata : public TargetMetadata<Runtime> {
     auto asWords = reinterpret_cast<
       ConstTargetMetadataPointer<Runtime, TargetMetadata> const *>(this);
     return (asWords + Description->GenericParams.Offset);
+  }
+
+  const TargetNominalTypeDescriptor<Runtime> *getDescription() const {
+    return Description.get();
   }
 
   StoredPointer offsetToDescriptorOffset() const {
@@ -2310,8 +2339,9 @@ using OpaqueExistentialContainer
   = TargetOpaqueExistentialContainer<InProcess>;
 
 /// The basic layout of a class-bounded existential type.
-struct ClassExistentialContainer {
-  void *Value;
+template <typename ContainedValue>
+struct ClassExistentialContainerImpl {
+  ContainedValue Value;
 
   const WitnessTable **getWitnessTables() {
     return reinterpret_cast<const WitnessTable**>(this + 1);
@@ -2320,11 +2350,15 @@ struct ClassExistentialContainer {
     return reinterpret_cast<const WitnessTable* const *>(this + 1);
   }
 
-  void copyTypeInto(ClassExistentialContainer *dest, unsigned numTables) const {
+  void copyTypeInto(ClassExistentialContainerImpl *dest,
+                    unsigned numTables) const {
     for (unsigned i = 0; i != numTables; ++i)
       dest->getWitnessTables()[i] = getWitnessTables()[i];
   }
 };
+using ClassExistentialContainer = ClassExistentialContainerImpl<void *>;
+using WeakClassExistentialContainer =
+  ClassExistentialContainerImpl<WeakReference>;
 
 /// The possible physical representations of existential types.
 enum class ExistentialTypeRepresentation {
@@ -2332,8 +2366,8 @@ enum class ExistentialTypeRepresentation {
   Opaque,
   /// The type uses a class existential representation.
   Class,
-  /// The type uses the ErrorProtocol boxed existential representation.
-  ErrorProtocol,
+  /// The type uses the Error boxed existential representation.
+  Error,
 };
 
 /// The structure of existential type metadata.
@@ -3433,6 +3467,12 @@ void swift_registerTypeMetadataRecords(const TypeMetadataRecord *begin,
 /// Return the type name for a given type metadata.
 std::string nameForMetadata(const Metadata *type,
                             bool qualified = true);
+
+/// Return the superclass, if any.  The result is nullptr for root
+/// classes and class protocol types.
+SWIFT_RUNTIME_STDLIB_INTERFACE
+extern "C"
+const Metadata *_swift_class_getSuperclass(const Metadata *theClass);
 
 } // end namespace swift
 

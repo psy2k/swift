@@ -15,7 +15,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ClangAdapter.h"
 #include "ImportEnumInfo.h"
+#include "ImporterImpl.h"
 #include "swift/Basic/StringExtras.h"
 #include "swift/Parse/Lexer.h"
 #include "clang/AST/Attr.h"
@@ -27,7 +29,7 @@ using namespace swift;
 using namespace importer;
 
 /// Classify the given Clang enumeration to describe how to import it.
-void EnumInfo::classifyEnum(const clang::EnumDecl *decl,
+void EnumInfo::classifyEnum(ASTContext &ctx, const clang::EnumDecl *decl,
                             clang::Preprocessor &pp) {
   // Anonymous enumerations simply get mapped to constants of the
   // underlying type of the enum, because there is no way to conjure up a
@@ -40,7 +42,7 @@ void EnumInfo::classifyEnum(const clang::EnumDecl *decl,
   // First, check for attributes that denote the classification
   if (auto domainAttr = decl->getAttr<clang::NSErrorDomainAttr>()) {
     kind = EnumKind::Enum;
-    attribute = domainAttr;
+    nsErrorDomain = ctx.AllocateCopy(domainAttr->getErrorDomain()->getName());
     return;
   }
 
@@ -284,4 +286,27 @@ void EnumInfo::determineConstantNamePrefix(ASTContext &ctx,
   }
 
   constantNamePrefix = ctx.AllocateCopy(commonPrefix);
+}
+
+StringRef EnumInfoCache::getEnumInfoKey(const clang::EnumDecl *decl,
+                                        SmallVectorImpl<char> &scratch) {
+  StringRef moduleName;
+  if (auto moduleOpt = getClangSubmoduleForDecl(decl)) {
+    if (*moduleOpt)
+      moduleName = (*moduleOpt)->getTopLevelModuleName();
+  }
+  if (moduleName.empty())
+    moduleName = decl->getASTContext().getLangOpts().CurrentModule;
+
+  StringRef enumName = decl->getDeclName()
+                           ? decl->getName()
+                           : decl->getTypedefNameForAnonDecl()->getName();
+
+  if (moduleName.empty())
+    return enumName;
+
+  scratch.append(moduleName.begin(), moduleName.end());
+  scratch.push_back('.');
+  scratch.append(enumName.begin(), enumName.end());
+  return StringRef(scratch.data(), scratch.size());
 }

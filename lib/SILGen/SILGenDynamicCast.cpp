@@ -290,9 +290,7 @@ static RValue emitCollectionDowncastExpr(SILGenFunction &SGF,
                                          SILLocation loc,
                                          Type destType,
                                          SGFContext C,
-                                         bool conditional,
-                                         bool bridgesFromObjC) {
-
+                                         bool conditional) {
   // Compute substitutions for the intrinsic call.
   auto fromCollection = cast<BoundGenericStructType>(
                           sourceType->getCanonicalType());
@@ -302,36 +300,31 @@ static RValue emitCollectionDowncastExpr(SILGenFunction &SGF,
   auto &ctx = SGF.getASTContext();
   FuncDecl *fn = nullptr;
   if (fromCollection->getDecl() == ctx.getArrayDecl()) {
-    fn = conditional ? ctx.getArrayConditionalCast(nullptr)
-                          : ctx.getArrayForceCast(nullptr);
+    fn = conditional ? SGF.SGM.getArrayConditionalCast(loc)
+                     : SGF.SGM.getArrayForceCast(loc);
   } else if (fromCollection->getDecl() == ctx.getDictionaryDecl()) {
-    fn = bridgesFromObjC
-           ? (conditional
-                ? ctx.getDictionaryBridgeFromObjectiveCConditional(nullptr)
-                : ctx.getDictionaryBridgeFromObjectiveC(nullptr))
-           : (conditional
-                ? ctx.getDictionaryDownCastConditional(nullptr)
-                : ctx.getDictionaryDownCast(nullptr));
+    fn = (conditional
+           ? SGF.SGM.getDictionaryDownCastConditional(loc)
+           : SGF.SGM.getDictionaryDownCast(loc));
   } else if (fromCollection->getDecl() == ctx.getSetDecl()) {
-    fn = bridgesFromObjC
-           ? (conditional
-                ? ctx.getSetBridgeFromObjectiveCConditional(nullptr)
-                : ctx.getSetBridgeFromObjectiveC(nullptr))
-           : (conditional
-                ? ctx.getSetDownCastConditional(nullptr)
-                : ctx.getSetDownCast(nullptr));
+    fn = (conditional
+           ? SGF.SGM.getSetDownCastConditional(loc)
+           : SGF.SGM.getSetDownCast(loc));
   } else {
     llvm_unreachable("unsupported collection upcast kind");
   }
 
-  auto fnArcheTypes = fn->getGenericParams()->getPrimaryArchetypes();
+  // This will have been diagnosed by the accessors above.
+  if (!fn) return SGF.emitUndefRValue(loc, destType);
+
+  auto fnGenericParams = fn->getGenericSignature()->getGenericParams();
   auto fromSubsts = fromCollection->gatherAllSubstitutions(
       SGF.SGM.SwiftModule, nullptr);
   auto toSubsts = toCollection->gatherAllSubstitutions(
       SGF.SGM.SwiftModule, nullptr);
-  assert(fnArcheTypes.size() == fromSubsts.size() + toSubsts.size() &&
+  assert(fnGenericParams.size() == fromSubsts.size() + toSubsts.size() &&
          "wrong number of generic collection parameters");
-  (void) fnArcheTypes;
+  (void) fnGenericParams;
 
   // Form type parameter substitutions.
   SmallVector<Substitution, 4> subs;
@@ -397,17 +390,11 @@ RValue Lowering::emitUnconditionalCheckedCast(SILGenFunction &SGF,
   // entry points.
   if (castKind == CheckedCastKind::ArrayDowncast ||
       castKind == CheckedCastKind::DictionaryDowncast ||
-      castKind == CheckedCastKind::DictionaryDowncastBridged ||
-      castKind == CheckedCastKind::SetDowncast ||
-      castKind == CheckedCastKind::SetDowncastBridged) {
-    bool bridgesFromObjC
-      = (castKind == CheckedCastKind::DictionaryDowncastBridged ||
-         castKind == CheckedCastKind::SetDowncastBridged);
+      castKind == CheckedCastKind::SetDowncast) {
     ManagedValue operandMV = SGF.emitRValueAsSingleValue(operand);
     return emitCollectionDowncastExpr(SGF, operandMV, operand->getType(), loc,
                                       targetType, C,
-                                      /*conditional=*/false,
-                                      bridgesFromObjC);
+                                      /*conditional=*/false);
   }
 
   CheckedCastEmitter emitter(SGF, loc, operand->getType(),
@@ -424,41 +411,26 @@ RValue Lowering::emitConditionalCheckedCast(SILGenFunction &SGF,
                                             CheckedCastKind castKind,
                                             SGFContext C) {
   // Drill into the result type.
-  OptionalTypeKind optKind;
   CanType resultObjectType =
-    optTargetType->getCanonicalType().getAnyOptionalObjectType(optKind);
+    optTargetType->getCanonicalType().getAnyOptionalObjectType();
   assert(resultObjectType);
 
   // Handle collection downcasts directly; they have specific library
   // entry points.
   if (castKind == CheckedCastKind::ArrayDowncast ||
       castKind == CheckedCastKind::DictionaryDowncast ||
-      castKind == CheckedCastKind::DictionaryDowncastBridged ||
-      castKind == CheckedCastKind::SetDowncast ||
-      castKind == CheckedCastKind::SetDowncastBridged) {
-    bool bridgesFromObjC
-      = (castKind == CheckedCastKind::DictionaryDowncastBridged ||
-         castKind == CheckedCastKind::SetDowncastBridged);
+      castKind == CheckedCastKind::SetDowncast) {
     return emitCollectionDowncastExpr(SGF, operand, operandType, loc,
                                       resultObjectType, C,
-                                      /*conditional=*/true,
-                                      bridgesFromObjC);
+                                      /*conditional=*/true);
   }
 
   operand = adjustForConditionalCheckedCastOperand(loc, operand,
                                                operandType->getCanonicalType(),
                                                    resultObjectType, SGF);
 
-  auto someDecl = SGF.getASTContext().getOptionalSomeDecl(optKind);
+  auto someDecl = SGF.getASTContext().getOptionalSomeDecl();
   auto &resultTL = SGF.getTypeLowering(optTargetType);
-
-  // Optional<T> currently fully abstracts its object.
-  auto abstraction = SGF.SGM.Types.getMostGeneralAbstraction();
-  auto &abstractResultObjectTL =
-    SGF.getTypeLowering(abstraction, resultObjectType);
-  auto &resultObjectTL = SGF.getTypeLowering(resultObjectType);
-  bool hasAbstraction =
-    (resultObjectTL.getLoweredType() != abstractResultObjectTL.getLoweredType());
 
   // Set up a result buffer if desirable/required.
   SILValue resultBuffer;
@@ -466,16 +438,14 @@ RValue Lowering::emitConditionalCheckedCast(SILGenFunction &SGF,
   Optional<TemporaryInitialization> resultObjectTemp;
   SGFContext resultObjectCtx;
   if (resultTL.isAddressOnly() ||
-      (!hasAbstraction && C.getEmitInto() &&
-       C.getEmitInto()->getAddressOrNull())) {
-    resultBuffer = SGF.getBufferForExprResult(loc, resultTL.getLoweredType(), C);
+      (C.getEmitInto() && C.getEmitInto()->getAddressOrNull())) {
+    SILType resultTy = resultTL.getLoweredType();
+    resultBuffer = SGF.getBufferForExprResult(loc, resultTy, C);
     resultObjectBuffer =
       SGF.B.createInitEnumDataAddr(loc, resultBuffer, someDecl,
-                     abstractResultObjectTL.getLoweredType().getAddressType());
+                    resultTy.getAnyOptionalObjectType().getAddressType());
     resultObjectTemp.emplace(resultObjectBuffer, CleanupHandle::invalid());
-
-    if (!hasAbstraction)
-      resultObjectCtx = SGFContext(&resultObjectTemp.getValue());
+    resultObjectCtx = SGFContext(&resultObjectTemp.getValue());
   }
 
   // Prepare a jump destination here.
@@ -489,9 +459,6 @@ RValue Lowering::emitConditionalCheckedCast(SILGenFunction &SGF,
       // If we're not emitting into a temporary, just wrap up the result
       // in Some and go to the continuation block.
       if (!resultObjectTemp) {
-        if (hasAbstraction)
-          objectValue = SGF.emitSubstToOrigValue(loc, objectValue, abstraction,
-                                                 resultObjectType);
         auto some = SGF.B.createEnum(loc, objectValue.forward(SGF),
                                      someDecl, resultTL.getLoweredType());
         SGF.Cleanups.emitBranchAndCleanups(scope.getExitDest(), loc, { some });
@@ -499,11 +466,6 @@ RValue Lowering::emitConditionalCheckedCast(SILGenFunction &SGF,
       }
 
       // Otherwise, make sure the value is in the context.
-      if (!objectValue.isInContext() && hasAbstraction) {
-        objectValue = SGF.emitSubstToOrigValue(loc, objectValue, abstraction,
-                                               resultObjectType,
-                                   SGFContext(&resultObjectTemp.getValue()));
-      }
       if (!objectValue.isInContext()) {
         objectValue.forwardInto(SGF, loc, resultObjectBuffer);
       }
@@ -512,7 +474,7 @@ RValue Lowering::emitConditionalCheckedCast(SILGenFunction &SGF,
     },
     // The failure path.
     [&] {
-      auto noneDecl = SGF.getASTContext().getOptionalNoneDecl(optKind);
+      auto noneDecl = SGF.getASTContext().getOptionalNoneDecl();
 
       // If we're not emitting into a temporary, just wrap up the result
       // in None and go to the continuation block.
@@ -549,18 +511,12 @@ SILValue Lowering::emitIsa(SILGenFunction &SGF, SILLocation loc,
   // Handle collection downcasts separately.
   if (castKind == CheckedCastKind::ArrayDowncast ||
       castKind == CheckedCastKind::DictionaryDowncast ||
-      castKind == CheckedCastKind::DictionaryDowncastBridged ||
-      castKind == CheckedCastKind::SetDowncast ||
-      castKind == CheckedCastKind::SetDowncastBridged) {
-    bool bridgesFromObjC
-      = (castKind == CheckedCastKind::DictionaryDowncastBridged ||
-         castKind == CheckedCastKind::SetDowncastBridged);
+      castKind == CheckedCastKind::SetDowncast) {
     ManagedValue operandMV = SGF.emitRValueAsSingleValue(operand);
     ManagedValue optValue = emitCollectionDowncastExpr(
                               SGF, operandMV, operand->getType(), loc,
                               targetType,
-                              SGFContext(), /*conditional=*/true,
-                              bridgesFromObjC)
+                              SGFContext(), /*conditional=*/true)
       .getAsSingleValue(SGF, loc);
 
     // Materialize the input.

@@ -14,6 +14,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/Lazy.h"
 #include "swift/Runtime/Config.h"
 #include "swift/Runtime/Debug.h"
 
@@ -27,19 +28,6 @@
 #include <unicode/uiter.h>
 
 #include "../SwiftShims/UnicodeShims.h"
-
-/// Zero weight 0-8, 14-31, 127.
-const int8_t _swift_stdlib_unicode_ascii_collation_table_impl[128] = {
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  2,  3,  4,  5,  0,   0,  0,  0,  0,
-    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  6,  12,  16, 28, 38, 29,
-    27, 15, 17, 18, 24, 32, 9,  8,  14, 25, 39, 40, 41, 42, 43,  44, 45, 46, 47,
-    48, 11, 10, 33, 34, 35, 13, 23, 50, 52, 54, 56, 58, 60, 62,  64, 66, 68, 70,
-    72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100, 19, 26, 20, 31,
-    7,  30, 49, 51, 53, 55, 57, 59, 61, 63, 65, 67, 69, 71, 73,  75, 77, 79, 81,
-    83, 85, 87, 89, 91, 93, 95, 97, 99, 21, 36, 22, 37, 0};
-
-const int8_t *_swift_stdlib_unicode_ascii_collation_table =
-    _swift_stdlib_unicode_ascii_collation_table_impl;
 
 static const UCollator *MakeRootCollator() {
   UErrorCode ErrorCode = U_ZERO_ERROR;
@@ -63,22 +51,21 @@ static const UCollator *MakeRootCollator() {
 // const here to make sure we don't misuse it.
 // http://sourceforge.net/p/icu/mailman/message/27427062/
 static const UCollator *GetRootCollator() {
-  static const UCollator *RootCollator = MakeRootCollator();
-  return RootCollator;
+  return SWIFT_LAZY_CONSTANT(MakeRootCollator());
 }
 
 /// This class caches the collation element results for the ASCII subset of
 /// unicode.
 class ASCIICollation {
-  int32_t CollationTable[128];
 public:
+  friend class swift::Lazy<ASCIICollation>;
 
+  static swift::Lazy<ASCIICollation> theTable;
   static const ASCIICollation *getTable() {
-    // We are reallying on C++11's guaranteed of thread safe static variable
-    // initialization.
-    static ASCIICollation collation;
-    return &collation;
+    return &theTable.get();
   }
+
+  int32_t CollationTable[128];
 
   /// Maps an ASCII character to a collation element priority as would be
   /// returned by a call to ucol_next().
@@ -154,7 +141,7 @@ swift::_swift_stdlib_unicode_compare_utf16_utf16(const uint16_t *LeftString,
 /// ==0 the strings are equal according to their collation.
 ///  >0 the left string is greater than the right string.
 int32_t
-swift::_swift_stdlib_unicode_compare_utf8_utf16(const char *LeftString,
+swift::_swift_stdlib_unicode_compare_utf8_utf16(const unsigned char *LeftString,
                                                 int32_t LeftLength,
                                                 const uint16_t *RightString,
                                                 int32_t RightLength) {
@@ -162,7 +149,7 @@ swift::_swift_stdlib_unicode_compare_utf8_utf16(const char *LeftString,
   UCharIterator RightIterator;
   UErrorCode ErrorCode = U_ZERO_ERROR;
 
-  uiter_setUTF8(&LeftIterator, LeftString, LeftLength);
+  uiter_setUTF8(&LeftIterator, reinterpret_cast<const char *>(LeftString), LeftLength);
 #if defined(__CYGWIN__) || defined(_MSC_VER)
   uiter_setString(&RightIterator, reinterpret_cast<const UChar *>(RightString),
                   RightLength);
@@ -184,16 +171,16 @@ swift::_swift_stdlib_unicode_compare_utf8_utf16(const char *LeftString,
 /// ==0 the strings are equal according to their collation.
 ///  >0 the left string is greater than the right string.
 int32_t
-swift::_swift_stdlib_unicode_compare_utf8_utf8(const char *LeftString,
+swift::_swift_stdlib_unicode_compare_utf8_utf8(const unsigned char *LeftString,
                                                int32_t LeftLength,
-                                               const char *RightString,
+                                               const unsigned char *RightString,
                                                int32_t RightLength) {
   UCharIterator LeftIterator;
   UCharIterator RightIterator;
   UErrorCode ErrorCode = U_ZERO_ERROR;
 
-  uiter_setUTF8(&LeftIterator, LeftString, LeftLength);
-  uiter_setUTF8(&RightIterator, RightString, RightLength);
+  uiter_setUTF8(&LeftIterator, reinterpret_cast<const char *>(LeftString), LeftLength);
+  uiter_setUTF8(&RightIterator, reinterpret_cast<const char *>(RightString), RightLength);
 
   uint32_t Diff = ucol_strcollIter(GetRootCollator(),
     &LeftIterator, &RightIterator, &ErrorCode);
@@ -203,91 +190,42 @@ swift::_swift_stdlib_unicode_compare_utf8_utf8(const char *LeftString,
   return Diff;
 }
 
-// These functions use murmurhash2 in its 32 and 64bit forms, which are
-// differentiated by the constants defined below. This seems like a good choice
-// for now because it operates efficiently in blocks rather than bytes, and 
-// the data returned from the collation iterator comes in 4byte chunks.
-#if __arm__ || __i386__
-#define HASH_SEED 0x88ddcc21
-#define HASH_M 0x5bd1e995
-#define HASH_R 24
-#else
-#define HASH_SEED 0x429b126688ddcc21
-#define HASH_M 0xc6a4a7935bd1e995
-#define HASH_R 47
-#endif
-
-static intptr_t hashChunk(const UCollator *Collator, intptr_t HashState,
-                          const uint16_t *Str, uint32_t Length,
-                          UErrorCode *ErrorCode) {
+void *swift::_swift_stdlib_unicodeCollationIterator_create(
+    const __swift_uint16_t *Str, __swift_uint32_t Length) {
+  UErrorCode ErrorCode = U_ZERO_ERROR;
 #if defined(__CYGWIN__) || defined(_MSC_VER)
   UCollationElements *CollationIterator = ucol_openElements(
-    Collator, reinterpret_cast<const UChar *>(Str), Length, ErrorCode);
+    GetRootCollator(), reinterpret_cast<const UChar *>(Str), Length,
+    &ErrorCode);
 #else
   UCollationElements *CollationIterator = ucol_openElements(
-    Collator, Str, Length, ErrorCode);
+    GetRootCollator(), Str, Length, &ErrorCode);
 #endif
-  while (U_SUCCESS(*ErrorCode)) {
-    intptr_t Elem = ucol_next(CollationIterator, ErrorCode);
-    // Ignore zero valued collation elements. They don't participate in the
-    // ordering relation.
-    if (Elem == 0)
-      continue;
-    if (Elem != UCOL_NULLORDER) {
-      Elem *= HASH_M;
-      Elem ^= Elem >> HASH_R;
-      Elem *= HASH_M;
-
-      HashState *= HASH_M;
-      HashState ^= Elem;
-    } else {
-      break;
-    }
-  }
-  ucol_closeElements(CollationIterator);
-  return HashState;
-}
-
-static intptr_t hashFinish(intptr_t HashState) {
-  HashState ^= HashState >> HASH_R;
-  HashState *= HASH_M;
-  HashState ^= HashState >> HASH_R;
-  return HashState;
-}
-
-intptr_t
-swift::_swift_stdlib_unicode_hash(const uint16_t *Str, int32_t Length) {
-  UErrorCode ErrorCode = U_ZERO_ERROR;
-  intptr_t HashState = HASH_SEED;
-  HashState = hashChunk(GetRootCollator(), HashState, Str, Length, &ErrorCode);
-
   if (U_FAILURE(ErrorCode)) {
-    swift::crash("hashChunk: Unexpected error hashing unicode string.");
+    swift::crash("_swift_stdlib_unicodeCollationIterator_create: ucol_openElements() failed.");
   }
-  return hashFinish(HashState);
+  return CollationIterator;
 }
 
-intptr_t swift::_swift_stdlib_unicode_hash_ascii(const char *Str,
-                                                 int32_t Length) {
-  const ASCIICollation *Table = ASCIICollation::getTable();
-  intptr_t HashState = HASH_SEED;
-  int32_t Pos = 0;
-  while (Pos < Length) {
-    const char c = Str[Pos++];
-    assert((c & 0x80) == 0 && "This table only exists for the ASCII subset");
-    intptr_t Elem = Table->map(c);
-    // Ignore zero valued collation elements. They don't participate in the
-    // ordering relation.
-    if (Elem == 0)
-      continue;
-    Elem *= HASH_M;
-    Elem ^= Elem >> HASH_R;
-    Elem *= HASH_M;
-
-    HashState *= HASH_M;
-    HashState ^= Elem;
+__swift_int32_t swift::_swift_stdlib_unicodeCollationIterator_next(
+    void *CollationIterator, bool *HitEnd) {
+  UErrorCode ErrorCode = U_ZERO_ERROR;
+  auto Result = ucol_next(
+      static_cast<UCollationElements *>(CollationIterator), &ErrorCode);
+  if (U_FAILURE(ErrorCode)) {
+    swift::crash("_swift_stdlib_unicodeCollationIterator_next: ucol_next() failed.");
   }
-  return hashFinish(HashState);
+  *HitEnd = (Result == UCOL_NULLORDER);
+  return Result;
+}
+
+void swift::_swift_stdlib_unicodeCollationIterator_delete(
+    void *CollationIterator) {
+  ucol_closeElements(static_cast<UCollationElements *>(CollationIterator));
+}
+
+const __swift_int32_t *swift::_swift_stdlib_unicode_getASCIICollationTable() {
+  return ASCIICollation::getTable()->CollationTable;
 }
 
 /// Convert the unicode string to uppercase. This function will return the
@@ -343,3 +281,5 @@ swift::_swift_stdlib_unicode_strToLower(uint16_t *Destination,
   }
   return OutputLength;
 }
+
+swift::Lazy<ASCIICollation> ASCIICollation::theTable;

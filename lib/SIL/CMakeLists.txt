@@ -1,4 +1,4 @@
-add_swift_library(swiftSIL
+add_swift_library(swiftSIL STATIC
   AbstractionPattern.cpp
   Bridging.cpp
   Dominance.cpp
@@ -23,6 +23,7 @@ add_swift_library(swiftSIL
   SILInstructions.cpp
   SILLocation.cpp
   SILModule.cpp
+  SILOpenedArchetypesTracker.cpp
   SILPrinter.cpp
   SILSuccessor.cpp
   SILType.cpp
@@ -33,5 +34,6 @@ add_swift_library(swiftSIL
   TypeLowering.cpp
   LINK_LIBRARIES
     swiftSerialization
-    swiftSema)
+    swiftSema
+)
 

@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-silgen -sdk %S/Inputs -I %S/Inputs -enable-source-import %s | FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen -sdk %S/Inputs -I %S/Inputs -enable-source-import %s | %FileCheck %s
 
 // REQUIRES: objc_interop
 
@@ -44,8 +44,8 @@ extension Gizmo : Bells {
 // CHECK: sil hidden [transparent] [thunk] @_TTWCSo5Gizmo14objc_witnesses5BellsS0_FS1_C
 // CHECK: bb0([[SELF:%[0-9]+]] : $*Gizmo, [[I:%[0-9]+]] : $Int, [[META:%[0-9]+]] : $@thick Gizmo.Type):
 
-// CHECK:   [[INIT:%[0-9]+]] = function_ref @_TFCSo5GizmoC{{.*}} : $@convention(method) (Int, @thick Gizmo.Type) -> @owned ImplicitlyUnwrappedOptional<Gizmo>
-// CHECK:   [[IUO_RESULT:%[0-9]+]] = apply [[INIT]]([[I]], [[META]]) : $@convention(method) (Int, @thick Gizmo.Type) -> @owned ImplicitlyUnwrappedOptional<Gizmo>
+// CHECK:   [[INIT:%[0-9]+]] = function_ref @_TFCSo5GizmoC{{.*}} : $@convention(method) (Int, @thick Gizmo.Type) -> @owned Optional<Gizmo>
+// CHECK:   [[IUO_RESULT:%[0-9]+]] = apply [[INIT]]([[I]], [[META]]) : $@convention(method) (Int, @thick Gizmo.Type) -> @owned Optional<Gizmo>
 // CHECK:   switch_enum [[IUO_RESULT]]
 // CHECK:   [[UNWRAPPED_RESULT:%[0-9]+]] = unchecked_enum_data [[IUO_RESULT]]
 // CHECK:   store [[UNWRAPPED_RESULT]] to [[SELF]] : $*Gizmo
@@ -54,13 +54,13 @@ extension Gizmo : Bells {
 // subscript requirement. rdar://problem/20371661
 
 protocol Subscriptable {
-  subscript(x: Int) -> AnyObject { get }
+  subscript(x: Int) -> Any { get }
 }
 
-// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWCSo7NSArray14objc_witnesses13SubscriptableS0_FS1_g9subscriptFSiPs9AnyObject_ : $@convention(witness_method) (Int, @in_guaranteed NSArray) -> @owned AnyObject {
-// CHECK:         function_ref @_TTOFCSo7NSArrayg9subscriptFSiPs9AnyObject_ : $@convention(method) (Int, @guaranteed NSArray) -> @owned AnyObject
-// CHECK-LABEL: sil shared [thunk] @_TTOFCSo7NSArrayg9subscriptFSiPs9AnyObject_ : $@convention(method) (Int, @guaranteed NSArray) -> @owned AnyObject {
-// CHECK:         class_method [volatile] %1 : $NSArray, #NSArray.subscript!getter.1.foreign
+// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWCSo7NSArray14objc_witnesses13SubscriptableS0_FS1_g9subscriptFSiP_ : $@convention(witness_method) (Int, @in_guaranteed NSArray) -> @out Any {
+// CHECK:         function_ref @_TTOFCSo7NSArrayg9subscriptFSiP_ : $@convention(method) (Int, @guaranteed NSArray) -> @out Any
+// CHECK-LABEL: sil shared [thunk] @_TTOFCSo7NSArrayg9subscriptFSiP_ : $@convention(method) (Int, @guaranteed NSArray) -> @out Any {
+// CHECK:         class_method [volatile] {{%.*}} : $NSArray, #NSArray.subscript!getter.1.foreign
 extension NSArray: Subscriptable {}
 
 // witness is a dynamic thunk:

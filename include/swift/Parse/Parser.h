@@ -121,12 +121,6 @@ public:
     IVOLP_InLet
   } InVarOrLetPattern = IVOLP_NotInVarOrLet;
 
-  bool GreaterThanIsOperator = true;
-
-  /// FIXME: Temporary hack to keep the selector-style declaration
-  /// syntax working.
-  bool ArgumentIsParameter = false;
-
   bool InPoundLineEnvironment = false;
 
   LocalContext *CurLocalContext = nullptr;
@@ -219,24 +213,6 @@ public:
 
     void pop() {
       CC.pop();
-    }
-  };
-
-  /// A RAII object for temporarily changing whether an operator starting with
-  /// '>' is an operator.
-  class GreaterThanIsOperatorRAII {
-    Parser &P;
-    bool OldValue;
-
-  public:
-    GreaterThanIsOperatorRAII(Parser &p, bool newValue)
-      : P(p), OldValue(p.GreaterThanIsOperator)
-    {
-      P.GreaterThanIsOperator = newValue;
-    }
-
-    ~GreaterThanIsOperatorRAII() {
-      P.GreaterThanIsOperator = OldValue;
     }
   };
 
@@ -414,8 +390,7 @@ public:
   }
 
   SourceLoc consumeIdentifier(Identifier *Result = nullptr) {
-    assert(Tok.is(tok::identifier) || Tok.is(tok::kw_self) ||
-           Tok.is(tok::kw_Self) || Tok.is(tok::kw_throws));
+    assert(Tok.isAny(tok::identifier, tok::kw_self, tok::kw_Self, tok::kw_throws));
     if (Result)
       *Result = Context.getIdentifier(Tok.getText());
     return consumeToken();
@@ -542,6 +517,9 @@ public:
   }
 
   ValueDecl *lookupInScope(DeclName Name) {
+    if (Context.LangOpts.EnableASTScopeLookup)
+      return nullptr;
+
     return getScopeInfo().lookupValueName(Name);
   }
 
@@ -655,16 +633,15 @@ public:
     PD_Default              = 0,
     PD_AllowTopLevel        = 1 << 1,
     PD_HasContainerType     = 1 << 2,
-    PD_DisallowNominalTypes = 1 << 3,
-    PD_DisallowInit         = 1 << 4,
-    PD_AllowDestructor      = 1 << 5,
-    PD_AllowEnumElement     = 1 << 6,
-    PD_InProtocol           = 1 << 7,
-    PD_InClass              = 1 << 8,
-    PD_InExtension          = 1 << 9,
-    PD_InStruct             = 1 << 10,
-    PD_InEnum               = 1 << 11,
-    PD_InLoop               = 1 << 12
+    PD_DisallowInit         = 1 << 3,
+    PD_AllowDestructor      = 1 << 4,
+    PD_AllowEnumElement     = 1 << 5,
+    PD_InProtocol           = 1 << 6,
+    PD_InClass              = 1 << 7,
+    PD_InExtension          = 1 << 8,
+    PD_InStruct             = 1 << 9,
+    PD_InEnum               = 1 << 10,
+    PD_InLoop               = 1 << 11
   };
 
   /// Options that control the parsing of declarations.
@@ -709,8 +686,8 @@ public:
                                                  DeclAttributes &Attributes);
   
   ParserResult<IfConfigDecl> parseDeclIfConfig(ParseDeclOptions Flags);
-  /// Parse a #line/#setline directive.
-  /// 'isLine = true' indicates parsing #line instead of #setline
+  /// Parse a #line/#sourceLocation directive.
+  /// 'isLine = true' indicates parsing #line instead of #sourcelocation
   ParserStatus parseLineDirective(bool isLine = false);
 
   void setLocalDiscriminator(ValueDecl *D);
@@ -827,18 +804,13 @@ public:
 
   ParserResult<OperatorDecl> parseDeclOperator(ParseDeclOptions Flags,
                                                DeclAttributes &Attributes);
-  ParserResult<OperatorDecl> parseDeclPrefixOperator(SourceLoc OperatorLoc,
-                                                     Identifier Name,
-                                                     SourceLoc NameLoc,
-                                                     DeclAttributes &Attrs);
-  ParserResult<OperatorDecl> parseDeclPostfixOperator(SourceLoc OperatorLoc,
-                                                      Identifier Name,
-                                                      SourceLoc NameLoc,
-                                                      DeclAttributes &Attrs);
-  ParserResult<OperatorDecl> parseDeclInfixOperator(SourceLoc OperatorLoc,
-                                                    Identifier Name,
-                                                    SourceLoc NameLoc,
-                                                    DeclAttributes &Attrs);
+  ParserResult<OperatorDecl> parseDeclOperatorImpl(SourceLoc OperatorLoc,
+                                                   Identifier Name,
+                                                   SourceLoc NameLoc,
+                                                   DeclAttributes &Attrs);
+
+  ParserResult<PrecedenceGroupDecl>
+  parseDeclPrecedenceGroup(ParseDeclOptions flags, DeclAttributes &attributes);
 
   //===--------------------------------------------------------------------===//
   // SIL Parsing.
@@ -878,9 +850,11 @@ public:
   bool parseGenericArguments(SmallVectorImpl<TypeRepr*> &Args,
                              SourceLoc &LAngleLoc,
                              SourceLoc &RAngleLoc);
-  ParserResult<IdentTypeRepr> parseTypeIdentifier();
 
-  ParserResult<ProtocolCompositionTypeRepr> parseTypeComposition();
+  ParserResult<TypeRepr> parseTypeIdentifier();
+  ParserResult<TypeRepr> parseTypeIdentifierOrTypeComposition();
+  ParserResult<ProtocolCompositionTypeRepr> parseAnyType();
+
   ParserResult<TupleTypeRepr> parseTypeTupleBody();
   ParserResult<TypeRepr> parseTypeArray(TypeRepr *Base);
 
@@ -921,7 +895,7 @@ public:
 
     /// Set the parsed context for all the initializers to the given
     /// function.
-    void setFunctionContext(DeclContext *DC);
+    void setFunctionContext(AbstractFunctionDecl *AFD);
     
     DefaultArgumentInfo(bool inTypeContext) {
       NextIndex = inTypeContext ? 1 : 0;
@@ -967,7 +941,7 @@ public:
     TypeRepr *Type = nullptr;
 
     /// The default argument for this parameter.
-    ExprHandle *DefaultArg = nullptr;
+    Expr *DefaultArg = nullptr;
     
     /// True if we emitted a parse error about this parameter.
     bool isInvalid = false;
@@ -1083,7 +1057,8 @@ public:
 
   bool canParseType();
   bool canParseTypeIdentifier();
-  bool canParseTypeComposition();
+  bool canParseTypeIdentifierOrTypeComposition();
+  bool canParseOldStyleProtocolComposition();
   bool canParseTypeTupleBody();
   bool canParseTypeAttribute();
   bool canParseGenericArguments();
@@ -1111,9 +1086,10 @@ public:
   ParserResult<Expr> parseExprUnary(Diag<> ID, bool isExprBasic);
   ParserResult<Expr> parseExprKeyPath();
   ParserResult<Expr> parseExprSelector();
-  ParserResult<Expr> parseExprSuper();
+  ParserResult<Expr> parseExprSuper(bool isExprBasic);
   ParserResult<Expr> parseExprConfiguration();
   ParserResult<Expr> parseExprStringLiteral();
+  ParserResult<Expr> parseExprTypeOf();
 
   /// If the token is an escaped identifier being used as an argument
   /// label, but doesn't need to be, diagnose it.
@@ -1179,6 +1155,19 @@ public:
   Expr *parseExprAnonClosureArg();
   ParserResult<Expr> parseExprList(tok LeftTok, tok RightTok);
 
+  /// Parse an expression list, keeping all of the pieces separated.
+  ParserStatus parseExprList(tok leftTok, tok rightTok,
+                             bool isPostfix,
+                             bool isExprBasic,
+                             SourceLoc &leftLoc,
+                             SmallVectorImpl<Expr *> &exprs,
+                             SmallVectorImpl<Identifier> &exprLabels,
+                             SmallVectorImpl<SourceLoc> &exprLabelLocs,
+                             SourceLoc &rightLoc,
+                             Expr *&trailingClosure);
+
+  ParserResult<Expr> parseTrailingClosure(SourceRange calleeRange);
+
   // NOTE: used only for legacy support for old object literal syntax.
   // Will be removed in the future.
   bool isCollectionLiteralStartingWithLSquareLit();
@@ -1188,12 +1177,10 @@ public:
   /// \param LK The literal kind as determined by the first token.
   /// \param NewName New name for a legacy literal.
   ParserResult<Expr> parseExprObjectLiteral(ObjectLiteralExpr::LiteralKind LK,
+                                            bool isExprBasic,
                                             StringRef NewName = StringRef());
   ParserResult<Expr> parseExprCallSuffix(ParserResult<Expr> fn,
-                                         Identifier firstSelectorPiece
-                                           = Identifier(),
-                                         SourceLoc firstSelectorPieceLoc
-                                           = SourceLoc());
+                                         bool isExprBasic);
   ParserResult<Expr> parseExprCollection(SourceLoc LSquareLoc = SourceLoc());
   ParserResult<Expr> parseExprArray(SourceLoc LSquareLoc, Expr *FirstExpr);
   ParserResult<Expr> parseExprDictionary(SourceLoc LSquareLoc, Expr *FirstKey);
@@ -1240,7 +1227,17 @@ public:
   ParserResult<GenericParamList> parseGenericParameters();
   ParserResult<GenericParamList> parseGenericParameters(SourceLoc LAngleLoc);
   ParserResult<GenericParamList> maybeParseGenericParams();
-  ParserStatus parseFreestandingGenericWhereClause(GenericParamList *&GPList);
+  void
+  diagnoseWhereClauseInGenericParamList(const GenericParamList *GenericParams);
+
+  enum class WhereClauseKind : unsigned {
+    Declaration,
+    Protocol,
+    AssociatedType
+  };
+  ParserStatus
+  parseFreestandingGenericWhereClause(GenericParamList *&GPList,
+                             WhereClauseKind kind=WhereClauseKind::Declaration);
   
   ParserStatus parseGenericWhereClause(SourceLoc &WhereLoc,
                                SmallVectorImpl<RequirementRepr> &Requirements,

@@ -19,7 +19,6 @@
 #include "swift/Subsystems.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/ASTVisitor.h"
-#include "swift/AST/ExprHandle.h"
 #include "swift/AST/Identifier.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/PrettyStackTrace.h"
@@ -765,10 +764,14 @@ public:
 
       // If someone is using an unlabeled break inside of an 'if' or 'do'
       // statement, produce a more specific error.
-      if (S->getTargetName().empty() && !ActiveLabeledStmts.empty() &&
-          (isa<IfStmt>(ActiveLabeledStmts.back()) ||
-           isa<DoStmt>(ActiveLabeledStmts.back())))
+      if (S->getTargetName().empty() &&
+          std::any_of(ActiveLabeledStmts.rbegin(),
+                      ActiveLabeledStmts.rend(),
+                      [&](Stmt *S) -> bool {
+                        return isa<IfStmt>(S) || isa<DoStmt>(S);
+                      })) {
         diagid = diag::unlabeled_break_outside_loop;
+      }
 
       TC.diagnose(S->getLoc(), diagid);
       return nullptr;
@@ -998,7 +1001,13 @@ bool TypeChecker::typeCheckCatchPattern(CatchStmt *S, DeclContext *DC) {
   }
   return false;
 }
-  
+
+static bool isDiscardableType(Type type) {
+  return (type->is<ErrorType>() ||
+          type->isUninhabited() ||
+          type->lookThroughAllAnyOptionalTypes()->isVoid());
+}
+
 void TypeChecker::checkIgnoredExpr(Expr *E) {
   // For parity with C, several places in the grammar accept multiple
   // comma-separated expressions and then bind them together as an implicit
@@ -1017,13 +1026,17 @@ void TypeChecker::checkIgnoredExpr(Expr *E) {
     return;
   }
 
-  // Drill through noop expressions we don't care about, like ParanExprs.
+  // Drill through noop expressions we don't care about.
   auto valueE = E;
   while (1) {
     valueE = valueE->getValueProvidingExpr();
     
     if (auto *OEE = dyn_cast<OpenExistentialExpr>(valueE))
       valueE = OEE->getSubExpr();
+    else if (auto *CRCE = dyn_cast<CovariantReturnConversionExpr>(valueE))
+      valueE = CRCE->getSubExpr();
+    else if (auto *EE = dyn_cast<ErasureExpr>(valueE))
+      valueE = EE->getSubExpr();
     else
       break;
   }
@@ -1037,10 +1050,10 @@ void TypeChecker::checkIgnoredExpr(Expr *E) {
     return;
   }
 
-  // If the result of this expression is of type "()", then it is safe to
-  // ignore.
-  if (valueE->getType()->isVoid() ||
-      valueE->getType()->is<ErrorType>())
+  // If the result of this expression is of type "Never" or "()"
+  // (the latter potentially wrapped in optionals) then it is
+  // safe to ignore.
+  if (isDiscardableType(valueE->getType()))
     return;
   
   // Complain about '#selector'.
@@ -1067,9 +1080,12 @@ void TypeChecker::checkIgnoredExpr(Expr *E) {
   // If we have an OptionalEvaluationExpr at the top level, then someone is
   // "optional chaining" and ignoring the result.  Produce a diagnostic if it
   // doesn't make sense to ignore it.
-  if (auto *OEE = dyn_cast<OptionalEvaluationExpr>(valueE))
+  if (auto *OEE = dyn_cast<OptionalEvaluationExpr>(valueE)) {
     if (auto *IIO = dyn_cast<InjectIntoOptionalExpr>(OEE->getSubExpr()))
       return checkIgnoredExpr(IIO->getSubExpr());
+    if (auto *C = dyn_cast<CallExpr>(OEE->getSubExpr()))
+      return checkIgnoredExpr(C);
+  }
 
   // Check if we have a call to a function not marked with
   // '@discardableResult'.
@@ -1193,46 +1209,25 @@ static void checkDefaultArguments(TypeChecker &tc, ParameterList *params,
   assert(dc->isLocalContext());
 
   for (auto &param : *params) {
-    unsigned curArgIndex = nextArgIndex++;
+    ++nextArgIndex;
     if (!param->getDefaultValue() || !param->hasType() ||
         param->getType()->is<ErrorType>())
       continue;
     
-    auto defaultValueHandle = param->getDefaultValue();
-    Expr *e = defaultValueHandle->getExpr();
-
-    // Re-use an existing initializer context if possible.
-    auto existingContext = e->findExistingInitializerContext();
-    DefaultArgumentInitializer *initContext;
-    if (existingContext) {
-      initContext = cast<DefaultArgumentInitializer>(existingContext);
-      assert(initContext->getIndex() == curArgIndex);
-      assert(initContext->getParent() == dc);
-
-    // Otherwise, allocate one temporarily.
-    } else {
-      initContext =
-        tc.Context.createDefaultArgumentContext(dc, curArgIndex);
-    }
+    Expr *e = param->getDefaultValue();
+    auto initContext = param->getDefaultArgumentInitContext();
 
     // Type-check the initializer, then flag that we did so.
-    if (tc.typeCheckExpression(e, initContext,
-                               TypeLoc::withoutLoc(param->getType()),
-                               CTP_DefaultParameter))
-      defaultValueHandle->setExpr(defaultValueHandle->getExpr(), true);
-    else
-      defaultValueHandle->setExpr(e, true);
+    if (!tc.typeCheckExpression(e, initContext,
+                                TypeLoc::withoutLoc(param->getType()),
+                                CTP_DefaultParameter))
+      param->setDefaultValue(e);
 
     tc.checkInitializerErrorHandling(initContext, e);
 
     // Walk the checked initializer and contextualize any closures
     // we saw there.
-    bool hasClosures = tc.contextualizeInitializer(initContext, e);
-
-    // If we created a new context and didn't run into any autoclosures
-    // during the walk, give the context back to the ASTContext.
-    if (!hasClosures && !existingContext)
-      tc.Context.destroyDefaultArgumentContext(initContext);
+    (void)tc.contextualizeInitializer(initContext, e);
   }
 }
 
@@ -1295,9 +1290,7 @@ Expr* TypeChecker::constructCallToSuperInit(ConstructorDecl *ctor,
   Expr *r = new (Context) UnresolvedDotExpr(superRef, SourceLoc(),
                                             Context.Id_init, DeclNameLoc(),
                                             /*Implicit=*/true);
-  Expr *args = TupleExpr::createEmpty(Context, SourceLoc(), SourceLoc(),
-                                      /*Implicit=*/true);
-  r = new (Context) CallExpr(r, args, /*Implicit=*/true);
+  r = CallExpr::createImplicit(Context, r, { }, { });
 
   if (ctor->hasThrows())
     r = new (Context) TryExpr(SourceLoc(), r, Type(), /*Implicit=*/true);
@@ -1317,7 +1310,7 @@ static bool checkSuperInit(TypeChecker &tc, ConstructorDecl *fromCtor,
                            ApplyExpr *apply, bool implicitlyGenerated) {
   // Make sure we are referring to a designated initializer.
   auto otherCtorRef = dyn_cast<OtherConstructorDeclRefExpr>(
-                        apply->getFn()->getSemanticsProvidingExpr());
+                        apply->getSemanticFn());
   if (!otherCtorRef)
     return false;
   
@@ -1339,8 +1332,15 @@ static bool checkSuperInit(TypeChecker &tc, ConstructorDecl *fromCtor,
   // only one designated initializer.
   if (implicitlyGenerated) {
     auto superclassTy = ctor->getExtensionType();
-    NameLookupOptions lookupOptions
-      = defaultConstructorLookupOptions | NameLookupFlags::KnownPrivate;
+    auto lookupOptions = defaultConstructorLookupOptions;
+    lookupOptions |= NameLookupFlags::KnownPrivate;
+
+    // If a constructor is only visible as a witness for a protocol
+    // requirement, it must be an invalid override. Also, protocol
+    // extensions cannot yet define designated initializers.
+    lookupOptions -= NameLookupFlags::ProtocolMembers;
+    lookupOptions -= NameLookupFlags::PerformConformanceCheck;
+
     for (auto member : tc.lookupConstructors(fromCtor, superclassTy,
                                              lookupOptions)) {
       auto superclassCtor = dyn_cast<ConstructorDecl>(member.Decl);
@@ -1382,7 +1382,8 @@ bool TypeChecker::typeCheckConstructorBodyUntil(ConstructorDecl *ctor,
       !isKnownEndOfConstructor(body->getElements().back())) {
     SmallVector<ASTNode, 8> Elts(body->getElements().begin(),
                                  body->getElements().end());
-    Elts.push_back(new (Context) ReturnStmt(SourceLoc(), /*value*/nullptr,
+    Elts.push_back(new (Context) ReturnStmt(body->getRBraceLoc(),
+                                            /*value*/nullptr,
                                             /*implicit*/true));
     body = BraceStmt::create(Context, body->getLBraceLoc(), Elts,
                              body->getRBraceLoc(), body->isImplicit());
@@ -1453,8 +1454,7 @@ bool TypeChecker::typeCheckConstructorBodyUntil(ConstructorDecl *ctor,
 
         std::pair<bool, Expr *> walkToExprPre(Expr *E) override {
           if (auto apply = dyn_cast<ApplyExpr>(E)) {
-            if (isa<OtherConstructorDeclRefExpr>(
-                  apply->getFn()->getSemanticsProvidingExpr())) {
+            if (isa<OtherConstructorDeclRefExpr>(apply->getSemanticFn())) {
               Found = apply;
               return { false, E };
             }

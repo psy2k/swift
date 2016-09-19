@@ -213,6 +213,8 @@ clang::CanQualType GenClangType::visitStructType(CanStructType type) {
                    ctx.VoidPtrTy);
   CHECK_NAMED_TYPE("ObjCBool", ctx.ObjCBuiltinBoolTy);
   CHECK_NAMED_TYPE("Selector", getClangSelectorType(ctx));
+  CHECK_NAMED_TYPE("UnsafeRawPointer", ctx.VoidPtrTy);
+  CHECK_NAMED_TYPE("UnsafeMutableRawPointer", ctx.VoidPtrTy);
 #undef CHECK_NAMED_TYPE
 
   // Map vector types to the corresponding C vectors.
@@ -419,9 +421,8 @@ clang::CanQualType
 GenClangType::visitBoundGenericType(CanBoundGenericType type) {
   // We only expect *Pointer<T>, ImplicitlyUnwrappedOptional<T>, and Optional<T>.
   // The first two are structs; the last is an enum.
-  OptionalTypeKind OTK;
-  if (auto underlyingTy = SILType::getPrimitiveObjectType(type)
-        .getAnyOptionalObjectType(IGM.getSILModule(), OTK)) {
+  if (auto underlyingTy =
+        SILType::getPrimitiveObjectType(type).getAnyOptionalObjectType()) {
     // The underlying type could be a bridged type, which makes any
     // sort of casual assertion here difficult.
     return Converter.convert(IGM, underlyingTy.getSwiftRValueType());
@@ -489,6 +490,11 @@ GenClangType::visitBoundGenericType(CanBoundGenericType type) {
 }
 
 clang::CanQualType GenClangType::visitEnumType(CanEnumType type) {
+  // Special case: Uninhabited enums are not @objc, so we don't
+  // know what to do below, but we can just convert to 'void'.
+  if (type->isUninhabited())
+    return Converter.convert(IGM, IGM.Context.TheEmptyTupleType);
+
   assert(type->getDecl()->isObjC() && "not an @objc enum?!");
   
   // @objc enums lower to their raw types.
@@ -735,15 +741,6 @@ clang::CanQualType ClangTypeConverter::convert(IRGenModule &IGM, CanType type) {
                             1);
         auto ptrTy = ctx.getObjCObjectPointerType(clangType);
         return ctx.getCanonicalType(ptrTy);
-      }
-    } else if (decl == IGM.Context.getBoolDecl()) {
-      // FIXME: Handle _Bool and DarwinBoolean.
-      auto &ctx = IGM.getClangASTContext();
-      auto &TI = ctx.getTargetInfo();
-      // FIXME: Figure out why useSignedCharForObjCBool() returns
-      // 'true' on Linux
-      if (IGM.ObjCInterop && TI.useSignedCharForObjCBool()) {
-        return ctx.SignedCharTy;
       }
     }
   }

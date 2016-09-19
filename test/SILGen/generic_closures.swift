@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -parse-stdlib -emit-silgen %s | FileCheck %s
+// RUN: %target-swift-frontend -parse-stdlib -emit-silgen %s | %FileCheck %s
 
 import Swift
 
@@ -22,12 +22,12 @@ func generic_nondependent_context<T>(_ x: T, y: Int) -> Int {
 func generic_capture<T>(_ x: T) -> Any.Type {
   func foo() -> Any.Type { return T.self }
 
-  // CHECK: [[FOO:%.*]] = function_ref @_TFF16generic_closures15generic_capture{{.*}} : $@convention(thin) <τ_0_0> () -> @thick protocol<>.Type
+  // CHECK: [[FOO:%.*]] = function_ref @_TFF16generic_closures15generic_capture{{.*}} : $@convention(thin) <τ_0_0> () -> @thick Any.Type
   // CHECK: [[FOO_CLOSURE:%.*]] = partial_apply [[FOO]]<T>()
   // CHECK: strong_release [[FOO_CLOSURE]]
   let _ = foo
 
-  // CHECK: [[FOO:%.*]] = function_ref @_TFF16generic_closures15generic_capture{{.*}} : $@convention(thin) <τ_0_0> () -> @thick protocol<>.Type
+  // CHECK: [[FOO:%.*]] = function_ref @_TFF16generic_closures15generic_capture{{.*}} : $@convention(thin) <τ_0_0> () -> @thick Any.Type
   // CHECK: [[FOO_CLOSURE:%.*]] = apply [[FOO]]<T>()
   return foo()
 }
@@ -36,12 +36,12 @@ func generic_capture<T>(_ x: T) -> Any.Type {
 func generic_capture_cast<T>(_ x: T, y: Any) -> Bool {
   func foo(_ a: Any) -> Bool { return a is T }
 
-  // CHECK: [[FOO:%.*]] = function_ref @_TFF16generic_closures20generic_capture_cast{{.*}} : $@convention(thin) <τ_0_0> (@in protocol<>) -> Bool
+  // CHECK: [[FOO:%.*]] = function_ref @_TFF16generic_closures20generic_capture_cast{{.*}} : $@convention(thin) <τ_0_0> (@in Any) -> Bool
   // CHECK: [[FOO_CLOSURE:%.*]] = partial_apply [[FOO]]<T>()
   // CHECK: strong_release [[FOO_CLOSURE]]
   let _ = foo
 
-  // CHECK: [[FOO:%.*]] = function_ref @_TFF16generic_closures20generic_capture_cast{{.*}} : $@convention(thin) <τ_0_0> (@in protocol<>) -> Bool
+  // CHECK: [[FOO:%.*]] = function_ref @_TFF16generic_closures20generic_capture_cast{{.*}} : $@convention(thin) <τ_0_0> (@in Any) -> Bool
   // CHECK: [[FOO_CLOSURE:%.*]] = apply [[FOO]]<T>([[ARG:%.*]])
   return foo(y)
 }
@@ -190,7 +190,7 @@ protocol HasClassAssoc { associatedtype Assoc : Class }
 // CHECK: [[GENERIC_FN:%.*]] = function_ref @_TFF16generic_closures34captures_class_constrained_genericuRxS_13HasClassAssocrFTx1fFwx5AssocwxS1__T_U_FT_FQQ_5AssocS2_
 // CHECK: [[CONCRETE_FN:%.*]] = partial_apply [[GENERIC_FN]]<T, T.Assoc>(%1)
 
-func captures_class_constrained_generic<T : HasClassAssoc>(_ x: T, f: (T.Assoc) -> T.Assoc) {
+func captures_class_constrained_generic<T : HasClassAssoc>(_ x: T, f: @escaping (T.Assoc) -> T.Assoc) {
   let _: () -> (T.Assoc) -> T.Assoc = { f }
 }
 
@@ -294,3 +294,21 @@ func mixed_generic_nongeneric_nesting<T>(t: T) {
 // CHECK-LABEL: sil shared @_TFF16generic_closures32mixed_generic_nongeneric_nestingurFT1tx_T_L_5outerurFT_T_ : $@convention(thin) <T> () -> ()
 // CHECK-LABEL: sil shared @_TFFF16generic_closures32mixed_generic_nongeneric_nestingurFT1tx_T_L_5outerurFT_T_L_6middleu__rFT1uqd___T_ : $@convention(thin) <T><U> (@in U) -> ()
 // CHECK-LABEL: sil shared @_TFFFF16generic_closures32mixed_generic_nongeneric_nestingurFT1tx_T_L_5outerurFT_T_L_6middleu__rFT1uqd___T_L_5inneru__rfT_qd__ : $@convention(thin) <T><U> (@owned @box U) -> @out U
+
+protocol Doge {
+  associatedtype Nose : NoseProtocol
+}
+
+protocol NoseProtocol {
+  associatedtype Squeegee
+}
+
+protocol Doggo {}
+
+struct DogSnacks<A : Doggo> {}
+
+func capture_same_type_representative<Daisy: Doge, Roo: Doggo>(slobber: Roo)
+    where Roo == Daisy.Nose.Squeegee {
+  var s = DogSnacks<Daisy.Nose.Squeegee>()
+  _ = { _ = s }
+}

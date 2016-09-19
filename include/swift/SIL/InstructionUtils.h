@@ -21,11 +21,24 @@ namespace swift {
 /// nothing left to strip.
 SILValue getUnderlyingObject(SILValue V);
 
+/// Strip off indexing and address projections.
+///
+/// This is similar to getUnderlyingObject, except that it does not strip any
+/// object-to-address projections, like ref_element_addr. In other words, the
+/// result is always an address value.
+SILValue getUnderlyingAddressRoot(SILValue V);
+
+SILValue getUnderlyingObjectStopAtMarkDependence(SILValue V);
+
 SILValue stripSinglePredecessorArgs(SILValue V);
 
 /// Return the underlying SILValue after stripping off all casts from the
 /// current SILValue.
 SILValue stripCasts(SILValue V);
+
+/// Return the underlying SILValue after stripping off all casts (but
+/// mark_dependence) from the current SILValue.
+SILValue stripCastsWithoutMarkDependence(SILValue V);
 
 /// Return the underlying SILValue after stripping off all upcasts from the
 /// current SILValue.

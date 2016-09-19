@@ -37,7 +37,6 @@ class GenericParamList;
 class NormalProtocolConformance;
 class ProtocolConformance;
 class ModuleDecl;
-class SubstitutionIterator;
 enum class AllocationArena;
   
 /// \brief Type substitution mapping from substitutable types to their
@@ -181,6 +180,10 @@ public:
       if (!assocTypeReq || req->isInvalid())
         continue;
 
+      // If we don't have and cannot resolve witnesses, skip it.
+      if (!resolver && !hasTypeWitness(assocTypeReq))
+        continue;
+
       const auto &TWInfo = getTypeWitnessSubstAndDecl(assocTypeReq, resolver);
       if (f(assocTypeReq, TWInfo.first, TWInfo.second))
         return true;
@@ -233,10 +236,9 @@ public:
   /// Retrieve the complete set of protocol conformances for directly inherited
   /// protocols.
   const InheritedConformanceMap &getInheritedConformances() const;
-  
+ 
   /// Get the generic parameters open on the conforming type.
-  /// FIXME: Retire in favor of getGenericSignature().
-  GenericParamList *getGenericParams() const;
+  GenericEnvironment *getGenericEnvironment() const;
 
   /// Get the generic signature containing the parameters open on the conforming
   /// interface type.
@@ -294,9 +296,7 @@ private:
   /// applies to the substituted type.
   ProtocolConformance *subst(ModuleDecl *module,
                              Type substType,
-                             ArrayRef<Substitution> subs,
-                             TypeSubstitutionMap &subMap,
-                             ArchetypeConformanceMap &conformanceMap);
+                             const SubstitutionMap &subMap) const;
 };
 
 /// Normal protocol conformance, which involves mapping each of the protocol
@@ -557,8 +557,6 @@ public:
   ArrayRef<Substitution> getGenericSubstitutions() const {
     return GenericSubstitutions;
   }
-
-  SubstitutionIterator getGenericSubstitutionIterator() const;
 
   /// Get the protocol being conformed to.
   ProtocolDecl *getProtocol() const {

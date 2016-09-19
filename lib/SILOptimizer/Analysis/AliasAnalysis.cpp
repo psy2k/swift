@@ -305,6 +305,7 @@ AliasResult AliasAnalysis::aliasAddressProjection(SILValue V1, SILValue V2,
 static bool isTypedAccessOracle(SILInstruction *I) {
   switch (I->getKind()) {
   case ValueKind::RefElementAddrInst:
+  case ValueKind::RefTailAddrInst:
   case ValueKind::StructElementAddrInst:
   case ValueKind::TupleElementAddrInst:
   case ValueKind::UncheckedTakeEnumDataAddrInst:
@@ -329,21 +330,20 @@ static bool isTypedAccessOracle(SILInstruction *I) {
 /// given value is directly derived from a memory location, it cannot
 /// alias. Call arguments also cannot alias because they must follow \@in, @out,
 /// @inout, or \@in_guaranteed conventions.
-///
-/// FIXME: pointer_to_address should contain a flag that indicates whether the
-/// address is aliasing. Currently, we aggressively assume that
-/// pointer-to-address is never used for type punning, which is not yet
-/// clearly specified by our UnsafePointer API.
 static bool isAddressRootTBAASafe(SILValue V) {
   if (auto *Arg = dyn_cast<SILArgument>(V))
     return Arg->isFunctionArg();
+
+  if (auto *PtrToAddr = dyn_cast<PointerToAddressInst>(V))
+    return PtrToAddr->isStrict();
 
   switch (V->getKind()) {
   default:
     return false;
   case ValueKind::AllocStackInst:
-  case ValueKind::AllocBoxInst:
-  case ValueKind::PointerToAddressInst:
+  case ValueKind::ProjectBoxInst:
+  case ValueKind::RefElementAddrInst:
+  case ValueKind::RefTailAddrInst:
     return true;
   }
 }
@@ -369,7 +369,7 @@ static SILType findTypedAccessType(SILValue V) {
 }
 
 SILType swift::computeTBAAType(SILValue V) {
-  if (isAddressRootTBAASafe(getUnderlyingObject(V)))
+  if (isAddressRootTBAASafe(getUnderlyingAddressRoot(V)))
     return findTypedAccessType(V);
 
   // FIXME: add ref_element_addr check here. TBAA says that objects cannot be
@@ -644,9 +644,9 @@ AliasResult AliasAnalysis::aliasInner(SILValue V1, SILValue V2,
 }
 
 bool AliasAnalysis::canApplyDecrementRefCount(FullApplySite FAS, SILValue Ptr) {
-  // Treat applications of @noreturn functions as decrementing ref counts. This
+  // Treat applications of no-return functions as decrementing ref counts. This
   // causes the apply to become a sink barrier for ref count increments.
-  if (FAS.getCallee()->getType().getAs<SILFunctionType>()->isNoReturn())
+  if (FAS.isCalleeNoReturn())
     return true;
 
   /// If the pointer cannot escape to the function we are done.
@@ -676,6 +676,13 @@ bool AliasAnalysis::canApplyDecrementRefCount(FullApplySite FAS, SILValue Ptr) {
 
 bool AliasAnalysis::canBuiltinDecrementRefCount(BuiltinInst *BI, SILValue Ptr) {
   for (SILValue Arg : BI->getArguments()) {
+
+    // Exclude some types of arguments where Ptr can never escape to.
+    if (isa<MetatypeInst>(Arg))
+      continue;
+    if (Arg->getType().is<BuiltinIntegerType>())
+      continue;
+
     // A builtin can only release an object if it can escape to one of the
     // builtin's arguments.
     if (EA->canEscapeToValue(Ptr, Arg))

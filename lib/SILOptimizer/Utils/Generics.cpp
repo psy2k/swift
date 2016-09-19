@@ -16,8 +16,32 @@
 #include "swift/SILOptimizer/Utils/Generics.h"
 #include "swift/SILOptimizer/Utils/GenericCloner.h"
 #include "swift/SIL/DebugUtils.h"
+#include "swift/AST/GenericEnvironment.h"
 
 using namespace swift;
+
+// Max depth of a bound generic which can be processed by the generic
+// specializer.
+// E.g. the depth of Array<Array<Array<T>>> is 3.
+// No specializations will be produced, if any of generic parameters contains
+// a bound generic type with the depth higher than this threshold 
+static const unsigned BoundGenericDepthThreshold = 50;
+
+static unsigned getBoundGenericDepth(Type t) {
+  unsigned Depth = 0;
+  if (auto BGT = t->getAs<BoundGenericType>()) {
+    Depth++;
+    auto GenericArgs = BGT->getGenericArgs();
+    unsigned MaxGenericArgDepth = 0;
+    for (auto GenericArg : GenericArgs) {
+      auto ArgDepth = getBoundGenericDepth(GenericArg);
+      if (ArgDepth > MaxGenericArgDepth)
+        MaxGenericArgDepth = ArgDepth;
+    }
+    Depth += MaxGenericArgDepth;
+  }
+  return Depth;
+}
 
 // =============================================================================
 // ReabstractionInfo
@@ -32,13 +56,13 @@ ReabstractionInfo::ReabstractionInfo(SILFunction *OrigF,
     return;
   }
 
-  TypeSubstitutionMap InterfaceSubs;
+  SubstitutionMap InterfaceSubs;
   if (OrigF->getLoweredFunctionType()->getGenericSignature())
     InterfaceSubs = OrigF->getLoweredFunctionType()->getGenericSignature()
       ->getSubstitutionMap(ParamSubs);
 
   // We do not support partial specialization.
-  if (hasUnboundGenericTypes(InterfaceSubs)) {
+  if (hasUnboundGenericTypes(InterfaceSubs.getMap())) {
     DEBUG(llvm::dbgs() <<
           "    Cannot specialize with unbound interface substitutions.\n");
     DEBUG(for (auto Sub : ParamSubs) {
@@ -46,14 +70,27 @@ ReabstractionInfo::ReabstractionInfo(SILFunction *OrigF,
           });
     return;
   }
-  if (hasDynamicSelfTypes(InterfaceSubs)) {
+  if (hasDynamicSelfTypes(InterfaceSubs.getMap())) {
     DEBUG(llvm::dbgs() << "    Cannot specialize with dynamic self.\n");
     return;
   }
+
+  // Check if the substitution contains any generic types that are too deep.
+  // If this is the case, bail to avoid the explosion in the number of 
+  // generated specializations.
+  for (auto Sub : ParamSubs) {
+    auto Replacement = Sub.getReplacement();
+    if (Replacement.findIf([](Type ty) -> bool {
+          return getBoundGenericDepth(ty) >= BoundGenericDepthThreshold;
+        })) {
+      return;
+    }
+  }
+
   SILModule &M = OrigF->getModule();
   Module *SM = M.getSwiftModule();
 
-  SubstitutedType = SILType::substFuncType(M, SM, InterfaceSubs,
+  SubstitutedType = SILType::substFuncType(M, SM, InterfaceSubs.getMap(),
                                            OrigF->getLoweredFunctionType(),
                                            /*dropGenerics = */ true);
 
@@ -151,10 +188,6 @@ GenericFuncSpecializer::GenericFuncSpecializer(SILFunction *GenericFunc,
 
   assert(GenericFunc->isDefinition() && "Expected definition to specialize!");
 
-  if (GenericFunc->getContextGenericParams())
-    ContextSubs = GenericFunc->getContextGenericParams()
-      ->getSubstitutionMap(ParamSubs);
-
   Mangle::Mangler Mangler;
   GenericSpecializationMangler GenericMangler(Mangler, GenericFunc,
                                               ParamSubs, Fragile);
@@ -194,7 +227,7 @@ SILFunction *GenericFuncSpecializer::tryCreateSpecialization() {
 
   // Create a new function.
   SILFunction * SpecializedF =
-    GenericCloner::cloneFunction(GenericFunc, Fragile, ReInfo, ContextSubs,
+    GenericCloner::cloneFunction(GenericFunc, Fragile, ReInfo,
                                  ParamSubs, ClonedName);
 
   // Check if this specialization should be linked for prespecialization.

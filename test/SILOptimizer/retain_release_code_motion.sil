@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -enable-sil-verify-all -retain-sinking -late-release-hoisting %s | FileCheck %s
+// RUN: %target-sil-opt -enable-sil-verify-all -retain-sinking -late-release-hoisting %s | %FileCheck %s
 
 import Builtin
 import Swift
@@ -67,7 +67,7 @@ sil @blocker : $@convention(thin) () -> ()
 sil @get_object : $@convention(thin) () -> Builtin.NativeObject
 sil @foo_init : $@convention(thin) (@thin foo.Type) -> foo
 sil [fragile] @guaranteed_use : $@convention(thin) (@guaranteed Builtin.NativeObject) -> ()
-sil [fragile] @guaranteed_throwing_use : $@convention(thin) (@guaranteed Builtin.NativeObject) -> @error ErrorProtocol
+sil [fragile] @guaranteed_throwing_use : $@convention(thin) (@guaranteed Builtin.NativeObject) -> @error Error
 
 // CHECK-LABEL: sil @sink_retains_from_preds : $@convention(thin) (Builtin.NativeObject) -> () {
 // CHECK: bb1:
@@ -256,6 +256,28 @@ bb3:
   return %5 : $()
 }
 
+final class MyArrayBuffer {
+  @sil_stored var dummyElements: Int32
+  init()
+}
+
+// CHECK-LABEL: sil @builtin_does_not_block_locally_allocated_ref
+// CHECK: builtin
+// CHECK-NEXT: strong_retain
+// CHECK-NEXT: strong_release
+// CHECK: return
+sil @builtin_does_not_block_locally_allocated_ref : $@convention(thin) () -> @owned MyArrayBuffer {
+bb0:
+  %3 = integer_literal $Builtin.Word, 3
+  %8 = alloc_ref $MyArrayBuffer
+  %74 = metatype $@thick String.Type
+  %67 = ref_element_addr %8 : $MyArrayBuffer, #MyArrayBuffer.dummyElements
+  %68 = address_to_pointer %67 : $*Int32 to $Builtin.RawPointer
+  strong_retain %8 : $MyArrayBuffer
+  %77 = builtin "destroyArray"<String>(%74 : $@thick String.Type, %68 : $Builtin.RawPointer, %3 : $Builtin.Word) : $()
+  strong_release %8 : $MyArrayBuffer
+  return %8 : $MyArrayBuffer
+}
 // CHECK-LABEL: sil @hoist_release_partially_available_retain
 // CHECK: bb0
 // CHECK: cond_br undef, bb1, bb2
@@ -291,7 +313,7 @@ bb3:
   return %5 : $()
 }
 
-// CHECK-LABEL: sil [fragile] @try_apply_blocks_release_hoisting : $@convention(thin) (Builtin.NativeObject) -> @error ErrorProtocol {
+// CHECK-LABEL: sil [fragile] @try_apply_blocks_release_hoisting : $@convention(thin) (Builtin.NativeObject) -> @error Error {
 // CHECK: bb0(
 // CHECK: strong_retain
 // CHECK: try_apply
@@ -299,21 +321,21 @@ bb3:
 // CHECK: strong_release
 // CHECK: bb2(
 // CHECK: strong_release
-sil [fragile] @try_apply_blocks_release_hoisting : $@convention(thin) (Builtin.NativeObject) -> @error ErrorProtocol {
+sil [fragile] @try_apply_blocks_release_hoisting : $@convention(thin) (Builtin.NativeObject) -> @error Error {
 bb0(%0 : $Builtin.NativeObject):
   strong_retain %0 : $Builtin.NativeObject
   %1 = function_ref @guaranteed_use : $@convention(thin) (@guaranteed Builtin.NativeObject) -> ()
   apply %1(%0) : $@convention(thin) (@guaranteed Builtin.NativeObject) -> ()
-  %2 = function_ref @guaranteed_throwing_use : $@convention(thin) (@guaranteed Builtin.NativeObject) -> @error ErrorProtocol
-  try_apply %2(%0) : $@convention(thin) (@guaranteed Builtin.NativeObject) -> @error ErrorProtocol, normal bb1, error bb2
+  %2 = function_ref @guaranteed_throwing_use : $@convention(thin) (@guaranteed Builtin.NativeObject) -> @error Error
+  try_apply %2(%0) : $@convention(thin) (@guaranteed Builtin.NativeObject) -> @error Error, normal bb1, error bb2
 
 bb1(%3 : $()):
   strong_release %0 : $Builtin.NativeObject
   return undef : $()
 
-bb2(%4 : $ErrorProtocol):
+bb2(%4 : $Error):
   strong_release %0 : $Builtin.NativeObject
-  throw %4 : $ErrorProtocol
+  throw %4 : $Error
 }
 
 

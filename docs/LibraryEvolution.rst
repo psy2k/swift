@@ -6,6 +6,13 @@
 :Author: Jordan Rose
 :Author: John McCall
 
+.. note::
+
+    This document uses some Sphinx-specific features which are not available on
+    GitHub. For proper rendering, download and build the docs yourself. Jordan
+    Rose also posts occasional snapshots at
+    https://jrose-apple.github.io/swift-library-evolution/.
+
 One of Swift's primary design goals is to allow efficient execution of code
 without sacrificing load-time abstraction of implementation.
 
@@ -121,7 +128,7 @@ specifying the name of the client library along with the required version::
 
     // Client code
     @available(Magician 1.5)
-    class CrystalBallView : MagicView { … }
+    class CrystalBallView : MagicView { /*…*/ }
 
 Library versions can also be checked dynamically using ``#available``, allowing
 for fallback behavior when the requested library version is not present::
@@ -167,7 +174,7 @@ document.
 Publishing Versioned API
 ========================
 
-A library's API is already marked with the ``public`` attribute, but if a
+A library's API is already marked with the ``public`` modifier, but if a
 client wants to work with multiple releases of the library, the API needs
 versioning information as well. A *versioned entity* represents anything with a
 runtime presence that a client may rely on; its version records when the entity
@@ -182,9 +189,12 @@ version of the library where the entity may be used.
   See `New Conformances`_, below.
 
 In a versioned library, any top-level public entity from the list above may not
-be made ``public`` without an appropriate version. A public entity declared
-within a versioned type (or an extension of a versioned type) will default to
-having the same version as the type.
+be made ``public`` (or ``open``) without an appropriate version. A public
+entity declared within a versioned type (or an extension of a versioned type)
+will default to having the same version as the type.
+
+In this document, the term "public" includes classes and members marked
+``open``.
 
 Code within a library may generally use all other entities declared within the
 library (barring their own availability checks), since the entire library is
@@ -286,8 +296,6 @@ The following changes are permitted:
 - Adding a default argument expression to a parameter.
 - Changing or removing a default argument is a `binary-compatible
   source-breaking change`.
-- The ``@noreturn`` attribute may be added to a function. ``@noreturn`` is a
-  `versioned attribute`.
 - The ``@discardableResult`` and ``@warn_unqualified_access`` attributes may
   be added to a function without any additional versioning information.
 
@@ -299,7 +307,6 @@ No other changes are permitted; the following are particularly of note:
 - A versioned function may not add, remove, or reorder parameters, whether or
   not they have default arguments.
 - A versioned function that throws may not become non-throwing or vice versa.
-- ``@noreturn`` may not be removed from a function.
 - The ``@noescape`` attribute may not be added to or removed from a parameter.
   It is not a `versioned attribute` and so there is no way to guarantee that it
   is safe when a client deploys against older versions of the library.
@@ -351,36 +358,36 @@ example using methods::
 
     public struct Point2D {
       var x, y: Double
-      public init(x: Double, y: Double) { … }
+      public init(x: Double, y: Double) { /*…*/ }
     }
 
     extension Point2D {
-      @inlineable public func distanceTo(_ other: Point2D) -> Double {
+      @inlineable public func distance(to other: Point2D) -> Double {
         let deltaX = self.x - other.x
         let deltaY = self.y - other.y
         return sqrt(deltaX*deltaX + deltaY*deltaY)
       }
     }
 
-As written, this ``distanceTo`` method is not safe to inline. The next release
+As written, this ``distance`` method is not safe to inline. The next release
 of the library could very well replace the implementation of ``Point2D`` with a
 polar representation::
 
     public struct Point2D {
       var r, theta: Double
-      public init(x: Double, y: Double) { … }
+      public init(x: Double, y: Double) { /*…*/ }
     }
 
-and the ``x`` and ``y`` properties have now disappeared. To avoid this, the bodies of inlineable functions have the following restrictions:
+and the ``x`` and ``y`` properties have now disappeared. To avoid this, the
+bodies of inlineable functions have the following restrictions:
 
 - They may not define any local types (other than typealiases).
 
-- They must not reference any ``private`` entities, except for those marked
-  ``@always_emit_into_client`` (see below). This includes local functions
-  defined within the inlineable function.
+- They must not reference any ``private`` or ``fileprivate`` entities, except
+  for those marked ``@alwaysEmitIntoClient`` (see below).
 
 - They must not reference any ``internal`` entities except for those that have
-  been `versioned`_ and those declared ``@always_emit_into_client``. See below
+  been `versioned`_ and those declared ``@alwaysEmitIntoClient``. See below
   for a discussion of versioning internal API.
 
 - They must not reference any entities from the current module introduced
@@ -394,7 +401,7 @@ as the current body makes sense when deploying against an earlier version of
 the library.
 
 
-``@always_emit_into_client``
+``@alwaysEmitIntoClient``
 ----------------------------
 
 The normal ``@inlineable`` attribute states that a function *may* be inlined
@@ -407,13 +414,13 @@ that the function is emitted into the client:
 - The function is a helper for an ``@inlineable`` function, but should not be
   part of the library's ABI.
 
-This is handled by the ``@always_emit_into_client`` attribute. If one of these
+This is handled by the ``@alwaysEmitIntoClient`` attribute. If one of these
 functions is referenced by a client module, its implementation is always copied
-into the client module. ``@always_emit_into_client`` functions are subject to
+into the client module. ``@alwaysEmitIntoClient`` functions are subject to
 the same restrictions as regular ``@inlineable`` functions, as described above.
 The description "inlineable" collectively refers to declarations marked with
-``@inlineable`` and declarations marked with ``@always_emit_into_client``. A
-declaration may not be both ``@inlineable`` and ``@always_emit_into_client``.
+``@inlineable`` and declarations marked with ``@alwaysEmitIntoClient``. A
+declaration may not be both ``@inlineable`` and ``@alwaysEmitIntoClient``.
 
 .. note::
 
@@ -422,60 +429,60 @@ declaration may not be both ``@inlineable`` and ``@always_emit_into_client``.
 .. admonition:: TODO
 
     All of these names are provisional. In particular, It Would Be Nice(tm) if
-    the final name for ``@always_emit_into_client`` was a variation of the
+    the final name for ``@alwaysEmitIntoClient`` was a variation of the
     final name for ``@inlineable``.
 
 Any local functions or closures within an inlineable function are themselves
-treated as ``@always_emit_into_client``. This is important in case it is
+treated as ``@alwaysEmitIntoClient``. This is important in case it is
 necessary to change the inlineable function later; existing clients should not
 be depending on internal details of the previous implementation.
 
-``@always_emit_into_client`` is *not* a versioned attribute, and therefore it
+``@alwaysEmitIntoClient`` is *not* a versioned attribute, and therefore it
 may not be added to a declaration that was versioned in a previous release of a
 library. An existing ``@inlineable`` function may not be changed to an
-``@always_emit_into_client`` function or vice versa.
+``@alwaysEmitIntoClient`` function or vice versa.
 
 It is a `binary-compatible source-breaking change` to completely remove a
-public entity marked ``@always_emit_into_client`` from a library. (Non-public,
+public entity marked ``@alwaysEmitIntoClient`` from a library. (Non-public,
 non-versioned entities may always be removed from a library; they are not part
 of its API or ABI.)
 
-Removing ``@always_emit_into_client`` from a public entity is also a
+Removing ``@alwaysEmitIntoClient`` from a public entity is also a
 `binary-compatible source-breaking change`, and requires updating the
-availability of that entity. Removing ``@always_emit_into_client`` from a
+availability of that entity. Removing ``@alwaysEmitIntoClient`` from a
 non-public entity is always permitted.
 
 .. note::
 
-    As an example, if an API is marked ``@always_emit_into_client`` in version
+    As an example, if an API is marked ``@alwaysEmitIntoClient`` in version
     1 of a library, and the attribute is removed in version 2, the entity
     itself must be updated to state that it is introduced in version 2. This is
     equivalent to removing the entity and then adding a new one with the same
     name.
 
 Although they are not a supported feature for arbitrary libraries at this time,
-`transparent`_ functions are implicitly marked ``@always_emit_into_client``.
+`transparent`_ functions are implicitly marked ``@alwaysEmitIntoClient``.
 
 .. _transparent: https://github.com/apple/swift/blob/master/docs/TransparentAttr.rst
 
 .. note::
 
-    Why have both ``@inlineable`` and ``@always_emit_into_client``? Because for
+    Why have both ``@inlineable`` and ``@alwaysEmitIntoClient``? Because for
     a larger function, like ``MutableCollectionType.sort``, it may be useful to
     provide the body to clients for analysis, but not duplicate code when not
-    necessary. ``@always_emit_into_client`` also may not be added to an
+    necessary. ``@alwaysEmitIntoClient`` also may not be added to an
     existing versioned declaration.
 
 .. admonition:: TODO
 
-    What does it mean for an ``@always_emit_into_client`` declaration to
+    What does it mean for an ``@alwaysEmitIntoClient`` declaration to
     satisfy a protocol requirement?
 
 
 Default Argument Expressions
 ----------------------------
 
-Default argument expressions are implemented as ``@always_emit_into_client``
+Default argument expressions are implemented as ``@alwaysEmitIntoClient``
 functions and thus are subject to the same restrictions as inlineable
 functions. A default argument implicitly has the same availability as the
 function it is attached to.
@@ -566,7 +573,7 @@ clients to access them more efficiently. This restricts changes a fair amount:
 
 Any inlineable accessors must follow the rules for `inlineable functions`_, as
 described above. Top-level computed variables may be marked
-``@always_emit_into_client``, with the same restrictions as for functions.
+``@alwaysEmitIntoClient``, with the same restrictions as for functions.
 
 Note that if a constant's initial value expression has any observable side
 effects, including the allocation of class instances, it must not be treated
@@ -601,7 +608,7 @@ layout.
 
 .. admonition:: TODO
 
-    We need to pin down how this, and the ``@fixed_contents`` attribute below,
+    We need to pin down how this, and the ``@fixedContents`` attribute below,
     interacts with the "Behaviors" proposal. Behaviors that just change the
     accessors of a property are fine, but those that provide new entry points
     are trickier.
@@ -617,7 +624,7 @@ Methods and Initializers
 
 For the most part struct methods and initializers are treated exactly like
 top-level functions. They permit all of the same modifications and can also be
-marked ``@inlineable`` or ``@always_emit_into_client``, with the same
+marked ``@inlineable`` or ``@alwaysEmitIntoClient``, with the same
 restrictions. Inlineable initializers must always delegate to another
 initializer, since new properties may be added between new releases. For the
 same reason, initializers declared outside of the struct's module must always
@@ -632,7 +639,7 @@ all of the same modifications, and also allow adding or removing an initial
 value entirely.
 
 Struct properties can also be marked ``@inlineable`` or
-``@always_emit_into_client``, with the same restrictions as for top-level
+``@alwaysEmitIntoClient``, with the same restrictions as for top-level
 bindings. An inlineable stored property may not become computed, but the offset
 of its storage within the struct is not necessarily fixed.
 
@@ -643,7 +650,7 @@ of its storage within the struct is not necessarily fixed.
     be fixed. This would have to be balanced against other goals for struct
     layout.
 
-Only computed properties may be marked ``@always_emit_into_client``.
+Only computed properties may be marked ``@alwaysEmitIntoClient``.
 
 Like top-level constants, it is *not* safe to change a ``let`` property into a
 variable or vice versa. Properties declared with ``let`` are assumed not to
@@ -661,7 +668,7 @@ stored subscripts. This means that the following changes are permitted:
 - Changing the body of an accessor.
 
 Like properties, subscripts can be marked ``@inlineable`` or
-``@always_emit_into_client``, which restricts the set of changes:
+``@alwaysEmitIntoClient``, which restricts the set of changes:
 
 - Adding a versioned setter is still permitted.
 - Adding or removing a non-public, non-versioned setter is still permitted.
@@ -693,13 +700,13 @@ can enforce its safe use.
 We've considered two possible syntaxes for this::
 
     @available(1.1)
-    extension Wand : MagicType {…}
+    extension Wand : MagicType {/*…*/}
 
 and
 
 ::
 
-    extension Wand : @available(1.1) MagicType {…}
+    extension Wand : @available(1.1) MagicType {/*…*/}
 
 The former requires fewer changes to the language grammar, but the latter could
 also be used on the declaration of the type itself (i.e. the ``struct``
@@ -715,12 +722,11 @@ provides.
 Fixed-Contents Structs
 ----------------------
 
-To opt out of this flexibility, a struct may be marked ``@fixed_contents``.
+To opt out of this flexibility, a struct may be marked ``@fixedContents``.
 This promises that no stored properties will be added to or removed from the
-struct, even ``private`` or ``internal`` ones. Additionally, all versioned
-instance stored properties in a ``@fixed_contents`` struct are implicitly
-declared ``@inlineable`` (as described above for top-level variables). In
-effect:
+struct, even non-public ones. Additionally, all versioned instance stored
+properties in a ``@fixedContents`` struct are implicitly declared
+``@inlineable`` (as described above for top-level variables). In effect:
 
 - Reordering all members, including stored properties, is still permitted.
 - Adding new stored instance properties (public or non-public) is not permitted.
@@ -751,20 +757,20 @@ generic parameters and members of tuples.
 While adding or removing stored properties is forbidden, existing properties may
 still be modified in limited ways:
 
-- An existing non-versioned ``internal`` property may be made ``private``, or
-  vice versa.
+- An existing non-public, non-versioned property may change its access level to
+  any other non-public access level.
 - A non-versioned ``internal`` property may be versioned (see `Versioning
   Internal Declarations`_).
 - A versioned ``internal`` property may be made ``public`` (without changing
   its version).
 
 An initializer of a fixed-contents struct may be declared ``@inlineable`` or
-``@always_emit_into_client`` even if it does not delegate to another
+``@alwaysEmitIntoClient`` even if it does not delegate to another
 initializer, as long as the ``@inlineable`` attribute, or the initializer
-itself, is not introduced earlier than the ``@fixed_contents`` attribute and
+itself, is not introduced earlier than the ``@fixedContents`` attribute and
 the struct has no non-versioned stored properties.
 
-A ``@fixed_contents`` struct is *not* guaranteed to use the same layout as a C
+A ``@fixedContents`` struct is *not* guaranteed to use the same layout as a C
 struct with a similar "shape". If such a struct is necessary, it should be
 defined in a C header and imported into Swift.
 
@@ -776,7 +782,7 @@ defined in a C header and imported into Swift.
 
 .. note::
 
-    Hypothetically, we could use a different model where a ``@fixed_contents``
+    Hypothetically, we could use a different model where a ``@fixedContents``
     struct only guarantees the "shape" of the struct, so to speak, while
     leaving all property accesses to go through function calls. This would
     allow stored properties to change their accessors, or (with the Behaviors
@@ -785,17 +791,17 @@ defined in a C header and imported into Swift.
     a simple C-like struct that groups together simple values, with only public
     stored properties and no observing accessors, and having to opt into direct
     access to those properties seems unnecessarily burdensome. The struct is
-    being declared ``@fixed_contents`` for a reason, after all: it's been
+    being declared ``@fixedContents`` for a reason, after all: it's been
     discovered that its use is causing performance issues.
 
     Consequently, as a first pass we may just require all stored properties in
-    a ``@fixed_contents`` struct, public or non-public, to have trivial
+    a ``@fixedContents`` struct, public or non-public, to have trivial
     accessors, i.e. no observing accessors and no behaviors.
 
-``@fixed_contents`` is a `versioned attribute`. This is so that clients can
+``@fixedContents`` is a `versioned attribute`. This is so that clients can
 deploy against older versions of the library, which may have a different layout
 for the struct. (In this case the client must manipulate the struct as if the
-``@fixed_contents`` attribute were absent.)
+``@fixedContents`` attribute were absent.)
 
 
 Enums
@@ -839,7 +845,7 @@ Initializers
 
 For the most part enum initializers are treated exactly like top-level
 functions. They permit all of the same modifications and can also be marked
-``@inlineable`` or ``@always_emit_into_client``, with the same restrictions.
+``@inlineable`` or ``@alwaysEmitIntoClient``, with the same restrictions.
 Unlike struct initializers, enum initializers do not always need to delegate to
 another initializer, even if they are inlineable or declared in a separate
 module.
@@ -953,16 +959,17 @@ Omitted from this list is the free addition of new members. Here classes are a
 little more restrictive than structs; they only allow the following changes:
 
 - Adding a new convenience initializer.
-- Adding a new designated initializer, if the class is not publicly
-  subclassable.
+- Adding a new designated initializer, if the class is not ``open``.
 - Adding a deinitializer.
 - Adding new, non-overriding method, subscript, or property.
-- Adding a new overriding member, though if the class is publicly-subclassable
-  the type of the member may not deviate from the member it overrides.
-  Changing the type could be incompatible with existing overrides in subclasses.
+- Adding a new overriding member, though if the class is ``open`` the type of
+  the member may not deviate from the member it overrides. Changing the type
+  could be incompatible with existing overrides in subclasses.
 
 Finally, classes allow the following changes that do not apply to structs:
 
+- A class may be marked ``open`` if it is not already marked ``final``.
+- A class may be marked ``final`` if it is not already marked ``open``.
 - Removing an explicit deinitializer. (A class with no declared deinitializer
   effectively has an implicit deinitializer.)
 - "Moving" a method, subscript, or property up to its superclass. The
@@ -973,8 +980,10 @@ Finally, classes allow the following changes that do not apply to structs:
   removed as long as the generic parameters, formal parameters, and return type
   *exactly* match the overridden declaration. Any existing callers should 
   automatically use the superclass implementation.
-- ``@noreturn`` may be only added to a method if it is not publicly
-  overridable.
+- Within an ``open`` class, any public method, subscript, or property may be
+  marked ``open`` if it is not already marked ``final``.
+- Any public method, subscript, or property may be marked ``final`` if it is not
+  already marked ``open``.
 - ``@IBOutlet``, ``@IBAction``, and ``@IBInspectable`` may be added to a member
   without providing any extra version information. Removing any of these is
   a `binary-compatible source-breaking change` if the member remains ``@objc``,
@@ -997,14 +1006,21 @@ Finally, classes allow the following changes that do not apply to structs:
     NSCollectionViewItem be a subclass of NSResponder or not? How would the
     compiler be able to enforce this?
 
+.. admonition:: TODO
+
+    Both ``final`` and ``open`` may be applied to a declaration after it has
+    been made public. However, these need to be treated as
+    `versioned attributes <versioned attribute>`. It's not clear what syntax
+    should be used for this.
+
 .. _NSCollectionViewItem: https://developer.apple.com/library/mac/documentation/Cocoa/Reference/NSCollectionViewItem_Class/index.html
 
 Other than those detailed above, no other changes to a class or its members
 are permitted. In particular:
 
-- ``final`` may not be added to *or* removed from a class or any of its members.
-  The presence of ``final`` enables optimization; its absence means there may
-  be subclasses/overrides that would be broken by the change.
+- ``open`` may not be removed from a class or its members.
+- ``final`` may not be removed from a class or its members. (The presence of
+  ``final`` enables optimization.)
 - ``dynamic`` may not be added to *or* removed from any members. Existing
   clients would not know to invoke the member dynamically.
 - A ``final`` override of a member may *not* be removed, even if the type
@@ -1013,9 +1029,6 @@ are permitted. In particular:
 - ``@objc`` and ``@nonobjc`` may not be added to or removed from the class or
   any existing members.
 - ``@NSManaged`` may not be added to or removed from any existing members.
-
-.. note:: These restrictions tie in with the ongoing discussions about
-  "``final``-by-default" and "non-publicly-subclassable-by-default".
 
 .. admonition:: TODO
 
@@ -1027,10 +1040,10 @@ are permitted. In particular:
 Initializers
 ------------
 
-New designated initializers may not be added to a publicly-subclassable class.
-This would change the inheritance of convenience initializers, which existing
-subclasses may depend on. A publicly-subclassable class also may not change
-a convenience initializer into a designated initializer or vice versa.
+New designated initializers may not be added to an ``open`` class. This would
+change the inheritance of convenience initializers, which existing subclasses
+may depend on. An ``open`` class also may not change a convenience initializer
+into a designated initializer or vice versa.
 
 A new ``required`` initializer may be added to a class only if it is a
 convenience initializer; that initializer may only call existing ``required``
@@ -1038,7 +1051,7 @@ initializers. An existing initializer may not be marked ``required``.
 
 All of the modifications permitted for top-level functions are also permitted
 for class initializers. Convenience initializers may be marked ``@inlineable``
-or ``@always_emit_into_client``, with the same restrictions as top-level
+or ``@alwaysEmitIntoClient``, with the same restrictions as top-level
 functions; designated initializers may not.
 
 
@@ -1055,23 +1068,17 @@ top-level functions, but the potential for overrides complicates things a little
 - Adding a default argument expression to a parameter.
 - Changing or removing a default argument is a `binary-compatible
   source-breaking change`.
-- The ``@noreturn`` attribute may be added to a public method only if it is
-  ``final`` or the class is not publicly subclassable. ``@noreturn`` is a
-  `versioned attribute`.
 - The ``@discardableResult`` and ``@warn_unqualified_access`` attributes may
   be added to a method without any additional versioning information.
 
 Class and instance methods may be marked ``@inlineable``, with the same
 restrictions as struct methods. ``dynamic`` methods may not be marked
 ``@inlineable``. Only non-overriding ``final`` methods may be marked
-``@always_emit_into_client``.
+``@alwaysEmitIntoClient``.
 
 If an inlineable method is overridden, the overriding method does not need to
 also be inlineable. Clients may only inline a method when they can devirtualize
 the call. (This does permit speculative devirtualization.)
-
-Any method that overrides a ``@noreturn`` method must also be marked
-``@noreturn``.
 
 
 Properties
@@ -1081,8 +1088,7 @@ Class and instance properties allow *most* of the modifications permitted for
 struct properties, but the potential for overrides complicates things a little.
 Variable properties (those declared with ``var``) allow the following changes:
 
-- Adding (but not removing) a computed setter to a ``final`` property or a
-  property in a non-publicly-subclassable class.
+- Adding (but not removing) a computed setter to a non-``open`` property.
 - Adding or removing a non-public, non-versioned setter.
 - Changing from a stored property to a computed property, or vice versa, as
   long as a previously versioned setter is not removed.
@@ -1095,7 +1101,7 @@ Variable properties (those declared with ``var``) allow the following changes:
 - Adding or removing ``unowned`` from a variable.
 - Adding or removing ``@NSCopying`` to/from a variable.
 
-Adding a public setter to a computed property that may be overridden is a
+Adding a public setter to an ``open`` property is a
 `binary-compatible source-breaking change`; any existing overrides will not
 know what to do with the setter and will likely not behave correctly.
 
@@ -1104,7 +1110,7 @@ value, as well as adding or removing an initial value entirely.
 
 Both variable and constant properties (on both instances and classes) may be
 marked ``@inlineable``; non-overriding ``final`` computed properties may also
-be marked ``@always_emit_into_client``. This behaves as described for struct
+be marked ``@alwaysEmitIntoClient``. This behaves as described for struct
 properties. ``dynamic`` properties may not be marked ``@inlineable``.
 
 If an inlineable property is overridden, the overriding property does not need
@@ -1118,18 +1124,18 @@ Subscripts
 Subscripts behave much like properties; they inherit the rules of their struct
 counterparts with a few small changes:
 
-- Adding (but not removing) a public setter to a ``final`` subscript or a
-  subscript is permitted in a non-publicly-subclassable class.
+- Adding (but not removing) a public setter to a non-``open`` subscript is
+  permitted.
 - Adding or removing a non-public, non-versioned setter is permitted.
 - Changing the body of an accessor is permitted.
 
-Adding a public setter to a subscript that may be overridden is a
+Adding a public setter to an ``open`` subscript is a
 `binary-compatible source-breaking change`; any existing overrides will not
 know what to do with the setter and will likely not behave correctly.
 
 Class subscripts may be marked ``@inlineable``, which behaves as described for
 struct subscripts. Non-overriding ``final`` subscripts may also be marked
-``@always_emit_into_client``. ``dynamic`` subscripts may not be marked
+``@alwaysEmitIntoClient``. ``dynamic`` subscripts may not be marked
 ``@inlineable``.
 
 If an inlineable subscript is overridden, the overriding subscript does not need
@@ -1230,7 +1236,7 @@ A Unifying Theme
 
 So far this document has talked about ways to give up flexibility for several
 different kinds of declarations: ``@inlineable`` for functions,
-``@fixed_contents`` for structs, etc. Each of these has a different set of
+``@fixedContents`` for structs, etc. Each of these has a different set of
 constraints it enforces on the library author and promises it makes to clients.
 However, they all follow a common theme of giving up the flexibility of future
 changes in exchange for improved performance and perhaps some semantic
@@ -1246,18 +1252,18 @@ multiple kinds of flexibility.
 Versioning Internal Declarations
 ================================
 
-The initial discussion on versioning focused on ``public`` APIs, making sure
+The initial discussion on versioning focused on public APIs, making sure
 that a client knows what features they can use when a specific version of a
 library is present. Inlineable functions have much the same constraints, except
 the inlineable function is the client and the entities being used may not be
-``public``.
+public.
 
 Adding a versioning annotation to an ``internal`` entity promises that the
 entity will be available at link time in the containing module's binary. This
 makes it safe to refer to such an entity from an inlineable function. If the
-entity is ever made ``public``, its availability should not be changed; not
-only is it safe for new clients to rely on it, but *existing* clients require
-its presence as well.
+entity is ever made ``public`` or ``open``, its availability should not be
+changed; not only is it safe for new clients to rely on it, but *existing*
+clients require its presence as well.
 
 .. note::
 
@@ -1265,27 +1271,27 @@ its presence as well.
     imply everything that ``public`` does, such as requiring overrides to be
     ``public``.
 
-Because a versioned class member may eventually be made ``public``, it must be
-assumed that new overrides may eventually appear from outside the module unless
-the member is marked ``final`` or the class is not publicly subclassable.
+Because a versioned class member may eventually be made ``open``, it must be
+assumed that new overrides may eventually appear from outside the module if the
+class is marked ``open`` unless the member is marked ``final``.
 
 Non-public conformances are never considered versioned, even if both the
 conforming type and the protocol are versioned. A conformance is considered
 public if and only if both the conforming type and protocol are public.
 
-Non-public entities declared ``@always_emit_into_client`` may not be versioned.
+Non-public entities declared ``@alwaysEmitIntoClient`` may not be versioned.
 
 .. admonition:: TODO
 
-    ...but we do need a way for ``@always_emit_into_client`` functions to
+    ...but we do need a way for ``@alwaysEmitIntoClient`` functions to
     declare the minimum version of the library they can be used in, right?
     Syntax?
 
-Entities declared ``private`` may not be versioned; the mangled name of such an
-entity includes an identifier based on the containing file, which means moving
-the declaration to another file changes the entity's mangled name. This implies
-that a client would not be able to find the entity at run time if the source
-code is reorganized, which is unacceptable.
+Entities declared ``private`` or ``fileprivate`` may not be versioned; the
+mangled name of such an entity includes an identifier based on the containing
+file, which means moving the declaration to another file changes the entity's
+mangled name. This implies that a client would not be able to find the entity
+at run time if the source code is reorganized, which is unacceptable.
 
 .. note::
 
@@ -1316,7 +1322,7 @@ is clearly not safe: older versions of the library will not expose the entity
 as part of their ABI. What may be less obvious is that the fragility attributes
 likewise are not safe to backdate, even if you know the attributes could have
 been added in the past. To give one example, the presence of ``@closed`` or
-``@fixed_contents`` may affect the layout and calling conventions for an enum
+``@fixedContents`` may affect the layout and calling conventions for an enum
 or struct.
 
 As the sole exception, it is safe to backdate ``@inlineable`` on a top-level
@@ -1431,10 +1437,11 @@ except that they can be enforced by the compiler.
 - ``trivial``: Promises that assignment just requires a fixed-size bit-for-bit
   copy without any indirection or reference-counting operations.
 
-- ``size_in_bits(N)``: Promises that the type is not larger than a certain
-  size. (It may be smaller.)
+- ``maximumFootprint(sizeInBits: N, alignmentInBits: A)``: Promises that the
+  type's size and required alignment are at most N bits and A bits,
+  respectively. (Both may be smaller.)
 
-- ``fixed_size``: Promises that the type has *some* size known at compile-time,
+- ``fixedSize``: Promises that the type has *some* size known at compile-time,
   allowing optimizations like promoting allocations to the stack. Only applies
   to fixed-contents structs and closed enums, which can already infer this
   information; the explicit annotation allows it to be enforced.
@@ -1444,13 +1451,18 @@ underscore the fact that they do not affect how a type is used at the source
 level, but do allow for additional optimizations. We may also expose some of
 these qualities to static or dynamic queries for performance-sensitive code.
 
-.. note:: Previous revisions of this document contained a ``no_payload``
+.. note:: Previous revisions of this document contained a ``noPayload``
     assertion for enums. However, this doesn't actually offer any additional
-    optimization opportunities over combining ``trivial`` with ``size_in_bits``,
-    and the latter is more flexible.
+    optimization opportunities over combining ``trivial`` with
+    ``maximumFootprint``, and the latter is more flexible.
+
+.. note:: None of these names / spellings are final. The name "trivial" comes
+    from C++, though Swift's trivial is closer to C++'s "`trivially copyable`__".
 
 All of these features need to be versioned, just like the more semantic
 fragility attributes above. The exact spelling is not proposed by this document.
+
+__ http://en.cppreference.com/w/cpp/types/is_trivially_copyable
 
 
 Resilience Domains
@@ -1525,7 +1537,7 @@ for verification. Important cases include but are not limited to:
 - Unsafe `backdating <#backdating>`_.
 
 - Unsafe modifications to entities marked with fragility attributes, such as
-  adding a stored property to a ``@fixed_contents`` struct.
+  adding a stored property to a ``@fixedContents`` struct.
 
 Wherever possible, this tool should also check for `binary-compatible
 source-breaking changes <binary-compatible source-breaking change>`, such as
@@ -1606,8 +1618,8 @@ of ``Summonable`` from the base class, but even that may not be possible if
 there are incompatible associated types involved (because changing a member
 typealias is not a safe change).
 
-One solution is to disallow adding a conformance for an existing protocol to a
-publicly-subclassable class.
+One solution is to disallow adding a conformance for an existing protocol to an
+``open`` class.
 
 
 Recompiling changes a protocol's implementation
@@ -1684,11 +1696,12 @@ document that affect language semantics:
 
 - `SE-0030 Property Behaviors`_
 - (draft) `Overridable methods in extensions`_
-- (planned) Making classes "sealed" by default
+- `SE-0117 Allow Allow distinguishing between public access and public overridability <SE-0117>`_
 - (planned) Restricting retroactive modeling (protocol conformances for types you don't own)
 - (planned) Default implementations in protocols
-- (planned) Generalized existentials (values of protocol type)
+- (planned) `Generalized existentials (values of protocol type) <Generics>`_
 - (planned) Open and closed enums
+- (planned) Removing the "constant" guarantee for 'let' across module boundaries
 - (planned) Syntax for declaring "versioned" entities and their features
 - (planned) Syntax for declaring inlineable code
 - (planned) Syntax for declaring fixed-contents structs
@@ -1699,6 +1712,8 @@ document that affect language semantics:
 
 .. _SE-0030 Property Behaviors: https://github.com/apple/swift-evolution/blob/master/proposals/0030-property-behavior-decls.md
 .. _Overridable methods in extensions: https://github.com/jrose-apple/swift-evolution/blob/overridable-members-in-extensions/proposals/nnnn-overridable-members-in-extensions.md
+.. _SE-0117: https://github.com/apple/swift-evolution/blob/master/proposals/0117-non-public-subclassable-by-default.md
+.. _Generics: https://github.com/apple/swift/blob/master/docs/GenericsManifesto.md#generalized-existentials
 
 This does not mean all of these proposals need to be accepted, only that their
 acceptance or rejection will affect this document.
@@ -1717,7 +1732,7 @@ Glossary
   API
     An `entity` in a library that a `client` may use, or the collection of all
     such entities in a library. (If contrasting with `SPI`, only those entities
-    that are available to arbitrary clients.) Marked ``public`` in
+    that are available to arbitrary clients.) Marked ``public`` or ``open`` in
     Swift. Stands for "Application Programming Interface".
 
   availability context

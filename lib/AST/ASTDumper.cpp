@@ -19,6 +19,7 @@
 #include "swift/AST/ASTPrinter.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/ForeignErrorConvention.h"
+#include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/ParameterList.h"
 #include "swift/AST/TypeVisitor.h"
 #include "swift/Basic/STLExtras.h"
@@ -310,17 +311,6 @@ namespace {
       }
       OS << ')';
     }
-    void visitNominalTypePattern(NominalTypePattern *P) {
-      printCommon(P, "pattern_nominal") << ' ';
-      P->getCastTypeLoc().getType().print(OS);
-      // FIXME: We aren't const-correct.
-      for (auto &elt : P->getMutableElements()) {
-        OS << '\n';
-        OS.indent(Indent) << elt.getPropertyName() << ": ";
-        printRec(elt.getSubPattern());
-      }
-      OS << ')';
-    }
     void visitExprPattern(ExprPattern *P) {
       printCommon(P, "pattern_expr");
       OS << '\n';
@@ -549,20 +539,22 @@ namespace {
       if (GenericTypeDecl *GTD = dyn_cast<GenericTypeDecl>(VD))
         printGenericParameters(OS, GTD->getGenericParams());
 
-      OS << " type='";
-      if (VD->hasType())
-        VD->getType().print(OS);
-      else
-        OS << "<null type>";
+      if (!VD->hasType() || !VD->getType()->is<PolymorphicFunctionType>()) {
+        OS << " type='";
+        if (VD->hasType())
+          VD->getType().print(OS);
+        else
+          OS << "<null type>";
+        OS << '\'';
+      }
 
       if (VD->hasInterfaceType() &&
           (!VD->hasType() ||
            VD->getInterfaceType().getPointer() != VD->getType().getPointer())) {
-        OS << "' interface type='";
+        OS << " interface type='";
         VD->getInterfaceType()->getCanonicalType().print(OS);
+        OS << '\'';
       }
-
-      OS << '\'';
 
       if (VD->hasAccessibility()) {
         OS << " access=";
@@ -570,11 +562,17 @@ namespace {
         case Accessibility::Private:
           OS << "private";
           break;
+        case Accessibility::FilePrivate:
+          OS << "fileprivate";
+          break;
         case Accessibility::Internal:
           OS << "internal";
           break;
         case Accessibility::Public:
           OS << "public";
+          break;
+        case Accessibility::Open:
+          OS << "open";
           break;
         }
       }
@@ -731,13 +729,14 @@ namespace {
     void visitSubscriptDecl(SubscriptDecl *SD) {
       printCommon(SD, "subscript_decl");
       OS << " storage_kind=" << getStorageKindName(SD->getStorageKind());
+      OS << " element=" << SD->getElementType()->getCanonicalType();
       printAccessors(SD);
       OS << ')';
     }
     
     void printCommonAFD(AbstractFunctionDecl *D, const char *Type) {
       printCommon(D, Type, FuncColor);
-      if (!D->getCaptureInfo().empty()) {
+      if (!D->getCaptureInfo().isTrivial()) {
         OS << " ";
         D->getCaptureInfo().print(OS);
       }
@@ -835,7 +834,7 @@ namespace {
       
       if (auto init = P->getDefaultValue()) {
         OS << " expression=\n";
-        printRec(init->getExpr());
+        printRec(init);
       }
       
       OS << ')';
@@ -981,19 +980,44 @@ namespace {
       Indent -= 2;
       OS << ')';
     }
+
+    void visitPrecedenceGroupDecl(PrecedenceGroupDecl *PGD) {
+      printCommon(PGD, "precedence_group_decl ");
+      OS << PGD->getName() << "\n";
+
+      OS.indent(Indent+2);
+      OS << "associativity ";
+      switch (PGD->getAssociativity()) {
+      case Associativity::None: OS << "none\n"; break;
+      case Associativity::Left: OS << "left\n"; break;
+      case Associativity::Right: OS << "right\n"; break;
+      }
+
+      OS.indent(Indent+2);
+      OS << "assignment " << (PGD->isAssignment() ? "true" : "false");
+
+      auto printRelations =
+          [&](StringRef label, ArrayRef<PrecedenceGroupDecl::Relation> rels) {
+        if (rels.empty()) return;
+        OS << '\n';
+        OS.indent(Indent+2);
+        OS << label << ' ' << rels[0].Name;
+        for (auto &rel : rels.slice(1))
+          OS << ", " << rel.Name;
+      };
+      printRelations("higherThan", PGD->getHigherThan());
+      printRelations("lowerThan", PGD->getLowerThan());
+
+      OS << ')';
+    }
     
     void visitInfixOperatorDecl(InfixOperatorDecl *IOD) {
       printCommon(IOD, "infix_operator_decl ");
       OS << IOD->getName() << "\n";
       OS.indent(Indent+2);
-      OS << "associativity ";
-      switch (IOD->getAssociativity()) {
-      case Associativity::None: OS << "none\n"; break;
-      case Associativity::Left: OS << "left\n"; break;
-      case Associativity::Right: OS << "right\n"; break;
-      }
-      OS.indent(Indent+2);
-      OS << "precedence " << IOD->getPrecedence() << ')';
+      OS << "precedence " << IOD->getPrecedenceGroupName();
+      if (!IOD->getPrecedenceGroup()) OS << " <null>";
+      OS << ')';
     }
     
     void visitPrefixOperatorDecl(PrefixOperatorDecl *POD) {
@@ -1497,6 +1521,15 @@ public:
     Indent -= 2;
   }
 
+  void printRecLabeled(Expr *E, StringRef label) {
+    Indent += 2;
+    OS.indent(Indent);
+    OS << '(' << label << '\n';
+    printRec(E);
+    OS << ')';
+    Indent -= 2;
+  }
+
   /// FIXME: This should use ExprWalker to print children.
 
   void printRec(Decl *D) { D->dump(OS, Indent + 2); }
@@ -1593,7 +1626,12 @@ public:
     printCommon(E, "string_literal_expr")
       << " encoding=";
     printStringEncoding(E->getEncoding());
-    OS << " value=" << QuotedString(E->getValue()) << ')';
+    OS << " value=" << QuotedString(E->getValue())
+       << " builtin_initializer=";
+    E->getBuiltinInitializer().dump(OS);
+    OS << " initializer=";
+    E->getInitializer().dump(OS);
+    OS << ')';
   }
   void visitInterpolatedStringLiteralExpr(InterpolatedStringLiteralExpr *E) {
     printCommon(E, "interpolated_string_literal_expr");
@@ -1620,12 +1658,21 @@ public:
     case MagicIdentifierLiteralExpr::Column:  OS << "#column"; break;
     case MagicIdentifierLiteralExpr::DSOHandle:  OS << "#dsohandle"; break;
     }
+
+    if (E->isString()) {
+      OS << " builtin_initializer=";
+      E->getBuiltinInitializer().dump(OS);
+      OS << " initializer=";
+      E->getInitializer().dump(OS);
+    }
     OS << ')';
   }
 
   void visitObjectLiteralExpr(ObjectLiteralExpr *E) {
     printCommon(E, "object_literal") 
-      << " kind='" << E->getLiteralKindPlainName() << "'\n";
+      << " kind='" << E->getLiteralKindPlainName() << "'";
+    printArgumentLabels(E->getArgumentLabels());
+    OS << "\n";
     printRec(E->getArg());
   }
 
@@ -1638,6 +1685,7 @@ public:
       << " decl=";
     E->getDeclRef().dump(OS);
     OS << E->getAccessSemantics();
+    OS << " function_ref=" << getFunctionRefKindStr(E->getFunctionRefKind());
     OS << " specialized=" << (E->isSpecialized()? "yes" : "no");
 
     for (auto TR : E->getGenericArgs()) {
@@ -1670,20 +1718,9 @@ public:
     printCommon(E, "overloaded_decl_ref_expr")
       << " name=" << E->getDecls()[0]->getName()
       << " #decls=" << E->getDecls().size()
-      << " specialized=" << (E->isSpecialized()? "yes" : "no");
+      << " specialized=" << (E->isSpecialized()? "yes" : "no")
+      << " function_ref=" << getFunctionRefKindStr(E->getFunctionRefKind());
 
-    for (ValueDecl *D : E->getDecls()) {
-      OS << '\n';
-      OS.indent(Indent);
-      D->dumpRef(OS);
-    }
-    OS << ')';
-  }
-  void visitOverloadedMemberRefExpr(OverloadedMemberRefExpr *E) {
-    printCommon(E, "overloaded_member_ref_expr")
-      << " name=" << E->getDecls()[0]->getName()
-      << " #decls=" << E->getDecls().size() << "\n";
-    printRec(E->getBase());
     for (ValueDecl *D : E->getDecls()) {
       OS << '\n';
       OS.indent(Indent);
@@ -1694,7 +1731,8 @@ public:
   void visitUnresolvedDeclRefExpr(UnresolvedDeclRefExpr *E) {
     printCommon(E, "unresolved_decl_ref_expr")
       << " name=" << E->getName()
-      << " specialized=" << (E->isSpecialized()? "yes" : "no") << ')';
+      << " specialized=" << (E->isSpecialized()? "yes" : "no") << ')'
+      << " function_ref=" << getFunctionRefKindStr(E->getFunctionRefKind());
   }
   void visitUnresolvedSpecializeExpr(UnresolvedSpecializeExpr *E) {
     printCommon(E, "unresolved_specialize_expr") << '\n';
@@ -1730,6 +1768,7 @@ public:
   void visitUnresolvedMemberExpr(UnresolvedMemberExpr *E) {
     printCommon(E, "unresolved_member_expr")
       << " name='" << E->getName() << "'";
+    printArgumentLabels(E->getArgumentLabels());
     if (E->getArgument()) {
       OS << '\n';
       printRec(E->getArgument());
@@ -1797,6 +1836,7 @@ public:
       OS << "  decl=";
       E->getDecl().dump(OS);
     }
+    printArgumentLabels(E->getArgumentLabels());
     OS << '\n';
     printRec(E->getBase());
     OS << '\n';
@@ -1807,6 +1847,7 @@ public:
     printCommon(E, "dynamic_subscript_expr")
       << " decl=";
     E->getMember().dump(OS);
+    printArgumentLabels(E->getArgumentLabels());
     OS << '\n';
     printRec(E->getBase());
     OS << '\n';
@@ -1815,7 +1856,8 @@ public:
   }
   void visitUnresolvedDotExpr(UnresolvedDotExpr *E) {
     printCommon(E, "unresolved_dot_expr")
-      << " field '" << E->getName() << "'";
+      << " field '" << E->getName() << "'"
+      << " function_ref=" << getFunctionRefKindStr(E->getFunctionRefKind());
     if (E->getBase()) {
       OS << '\n';
       printRec(E->getBase());
@@ -1878,6 +1920,13 @@ public:
     printRec(E->getSubExpr());
     OS << ')';
   }
+  void visitAnyHashableErasureExpr(AnyHashableErasureExpr *E) {
+    printCommon(E, "any_hashable_erasure_expr") << '\n';
+    printRec(E->getConformance());
+    OS << '\n';
+    printRec(E->getSubExpr());
+    OS << ')';
+  }
   void visitLoadExpr(LoadExpr *E) {
     printCommon(E, "load_expr") << '\n';
     printRec(E->getSubExpr());
@@ -1890,10 +1939,16 @@ public:
   }
   void visitCollectionUpcastConversionExpr(CollectionUpcastConversionExpr *E) {
     printCommon(E, "collection_upcast_expr");
-    if (E->bridgesToObjC())
-      OS << " bridges_to_objc";
     OS << '\n';
     printRec(E->getSubExpr());
+    if (auto keyConversion = E->getKeyConversion()) {
+      OS << '\n';
+      printRecLabeled(keyConversion.Conversion, "key_conversion");
+    }
+    if (auto valueConversion = E->getValueConversion()) {
+      OS << '\n';
+      printRecLabeled(valueConversion.Conversion, "value_conversion");
+    }
     OS << ')';
   }
   void visitDerivedToBaseExpr(DerivedToBaseExpr *E) {
@@ -2014,7 +2069,7 @@ public:
   llvm::raw_ostream &printClosure(AbstractClosureExpr *E, char const *name) {
     printCommon(E, name);
     OS << " discriminator=" << E->getDiscriminator();
-    if (!E->getCaptureInfo().empty()) {
+    if (!E->getCaptureInfo().isTrivial()) {
       OS << " ";
       E->getCaptureInfo().print(OS);
     }
@@ -2067,12 +2122,21 @@ public:
     OS << ')';
   }
 
+  void printArgumentLabels(ArrayRef<Identifier> argLabels) {
+    OS << "  arg_labels=";
+    for (auto label : argLabels) 
+      OS << (label.empty() ? "_" : label.str()) << ":";
+  }
+
   void printApplyExpr(ApplyExpr *E, const char *NodeName) {
     printCommon(E, NodeName);
     if (E->isSuper())
       OS << " super";
     if (E->isThrowsSet())
       OS << (E->throws() ? " throws" : " nothrow");
+    if (auto call = dyn_cast<CallExpr>(E))
+      printArgumentLabels(call->getArgumentLabels());
+
     OS << '\n';
     printRec(E->getFn());
     OS << '\n';
@@ -2147,11 +2211,6 @@ public:
     printRec(E->getThenExpr());
     OS << '\n';
     printRec(E->getElseExpr());
-    OS << ')';
-  }
-  void visitDefaultValueExpr(DefaultValueExpr *E) {
-    printCommon(E, "default_value_expr") << ' ';
-    printRec(E->getSubExpr());
     OS << ')';
   }
   void visitAssignExpr(AssignExpr *E) {
@@ -2414,7 +2473,13 @@ public:
     printRec(T->getBase());
     OS << ')';
   }
-  
+
+  void visitProtocolTypeRepr(ProtocolTypeRepr *T) {
+    printCommon(T, "type_protocol") << '\n';
+    printRec(T->getBase());
+    OS << ')';
+  }
+
   void visitInOutTypeRepr(InOutTypeRepr *T) {
     printCommon(T, "type_inout") << '\n';
     printRec(T->getBase());
@@ -2642,50 +2707,6 @@ namespace {
           printField("name", elt.getName().str());
         if (elt.isVararg())
           printFlag("vararg");
-        switch (elt.getDefaultArgKind()) {
-        case DefaultArgumentKind::None:
-          break;
-
-        case DefaultArgumentKind::Column:
-          printField("default_arg", "#column");
-          break;
-
-        case DefaultArgumentKind::DSOHandle:
-          printField("default_arg", "#dsohandle");
-          break;
-
-        case DefaultArgumentKind::File:
-          printField("default_arg", "#file");
-          break;
-
-        case DefaultArgumentKind::Function:
-          printField("default_arg", "#function");
-          break;
-
-        case DefaultArgumentKind::Inherited:
-          printField("default_arg", "inherited");
-          break;
-
-        case DefaultArgumentKind::Line:
-          printField("default_arg", "#line");
-          break;
-
-        case DefaultArgumentKind::Nil:
-          printField("default_arg", "nil");
-          break;
-
-        case DefaultArgumentKind::EmptyArray:
-          printField("default_arg", "[]");
-          break;
-
-        case DefaultArgumentKind::EmptyDictionary:
-          printField("default_arg", "[:]");
-          break;
-
-        case DefaultArgumentKind::Normal:
-          printField("default_arg", "normal");
-          break;
-        }
 
         printRec(elt.getType());
         OS << ")";
@@ -2896,9 +2917,11 @@ namespace {
         break;
       }
 
-      printFlag(T->isNoReturn(), "noreturn");
       printFlag(T->isAutoClosure(), "autoclosure");
-      printFlag(T->isNoEscape(), "noescape");
+
+      // Dump out either @noescape or @escaping
+      printFlag(!T->isNoEscape(), "@escaping");
+
       printFlag(T->throws(), "throws");
 
       printRec("input", T->getInput());
@@ -3066,4 +3089,12 @@ void TypeBase::dump(raw_ostream &os, unsigned indent) const {
   // Make sure to print type variables.
   llvm::SaveAndRestore<bool> X(ctx.LangOpts.DebugConstraintSolver, true);
   Type(const_cast<TypeBase *>(this)).dump(os, indent);
+}
+
+void GenericEnvironment::dump() const {
+  llvm::errs() << "Generic environment:\n";
+  for (auto pair : getInterfaceToArchetypeMap()) {
+    pair.first->dump();
+    pair.second->dump();
+  }
 }

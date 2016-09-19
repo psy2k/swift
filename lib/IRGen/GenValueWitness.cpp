@@ -1334,10 +1334,7 @@ static void addValueWitnesses(IRGenModule &IGM, FixedPacking packing,
 /// Currently, this is true if the size and/or alignment of the type is
 /// dependent on its generic parameters.
 bool irgen::hasDependentValueWitnessTable(IRGenModule &IGM, CanType ty) {
-  if (auto ugt = dyn_cast<UnboundGenericType>(ty))
-    ty = ugt->getDecl()->getDeclaredTypeInContext()->getCanonicalType();
-
-  return !IGM.getTypeInfoForUnlowered(ty).isFixedSize();
+  return !IGM.getTypeInfoForUnlowered(getFormalTypeInContext(ty)).isFixedSize();
 }
 
 static void addValueWitnessesForAbstractType(IRGenModule &IGM,
@@ -1540,6 +1537,26 @@ Address TypeInfo::indexArray(IRGenFunction &IGF, Address base,
                                                            index);
     return Address(destValue, base.getAlignment());
   }
+}
+
+Address TypeInfo::roundUpToTypeAlignment(IRGenFunction &IGF, Address base,
+                                         SILType T) const {
+  Alignment Align = base.getAlignment();
+  llvm::Value *TyAlignMask = getAlignmentMask(IGF, T);
+  if (auto *TyAlignMaskConst = dyn_cast<llvm::ConstantInt>(TyAlignMask)) {
+    Alignment TyAlign(TyAlignMaskConst->getZExtValue() + 1);
+
+    // No need to align if the base is already aligned.
+    if (TyAlign <= Align)
+      return base;
+  }
+  llvm::Value *Addr = base.getAddress();
+  Addr = IGF.Builder.CreatePtrToInt(Addr, IGF.IGM.IntPtrTy);
+  Addr = IGF.Builder.CreateNUWAdd(Addr, TyAlignMask);
+  llvm::Value *InvertedMask = IGF.Builder.CreateNot(TyAlignMask);
+  Addr = IGF.Builder.CreateAnd(Addr, InvertedMask);
+  Addr = IGF.Builder.CreateIntToPtr(Addr, base.getAddress()->getType());
+  return Address(Addr, Align);
 }
 
 void TypeInfo::destroyArray(IRGenFunction &IGF, Address array,

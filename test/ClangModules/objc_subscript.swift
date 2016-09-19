@@ -1,4 +1,4 @@
-// RUN: rm -rf %t && mkdir %t
+// RUN: rm -rf %t && mkdir -p %t
 // RUN: %build-clang-importer-objc-overlays
 
 // RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk-nosource -I %t) -emit-sil -I %S/Inputs/custom-modules %s -verify
@@ -9,14 +9,14 @@ import ObjCSubscripts
 
 // rdar://problem/19772357
 class KeySubscript1Sub : KeySubscript1 {
-  override subscript (str: String!) -> AnyObject! {
+  override subscript (str: String!) -> Any! {
     get { return self }
     set { }
   }
 }
 
 class KeySubscript2Sub : KeySubscript2 {
-  override subscript (str: String) -> AnyObject? {
+  override subscript (str: String) -> Any? {
     get { return self }
     set { }
   }
@@ -30,7 +30,7 @@ class KeySubscript3Sub : KeySubscript3 {
 }
 
 class KeySubscript4Sub : KeySubscript4 {
-  override subscript (str: [AnyObject]) -> String? {
+  override subscript (str: [Any]) -> String? {
     get { return nil }
     set { }
   }

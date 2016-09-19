@@ -2,6 +2,9 @@
 // REQUIRES: long_test
 // REQUIRES: executable_test
 
+// rdar://28250966
+// UNSUPPORTED: OS=watchos
+
 import SwiftPrivate
 import StdlibUnittest
 
@@ -21,8 +24,8 @@ UTF8Decoder.test("Internal/_decodeOne") {
     expectOptionalEqual(scalar.value, codePoint, "data=\(asHex(data))")
   }
 
-  for i in 0..<0xd800 { ensureValid(UnicodeScalar(i)) }
-  for i in 0xe000...0x10ffff { ensureValid(UnicodeScalar(i)) }
+  for i in 0..<0xd800 { ensureValid(UnicodeScalar(i)!) }
+  for i in 0xe000...0x10ffff { ensureValid(UnicodeScalar(i)!) }
 
   // Check number of valid/invalid sequences of different lengths
   var validLengthCounts = [ 0, 0, 0, 0, 0 ]
